@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .exceptions import InvalidObservationError, TaskProfileError
+from .exceptions import InvalidBlockedReportError, InvalidObservationError, TaskProfileError
 
 # --------------------------------------------------------------------------
 # Ordered enums
@@ -131,6 +131,20 @@ def _validate_non_negative_int(name: str, value: int) -> int:
     return value
 
 
+def _validate_positive_int(name: str, value: int) -> int:
+    """Strict positive-int boundary check (Round 2 / H1): ``bool`` is a
+    subclass of ``int`` in Python, so ``isinstance(value, int)`` alone
+    would silently accept ``True``/``False`` as ``1``/``0``. Every public
+    "count"-shaped field must reject bool, float, str, and None
+    explicitly, not just numbers below the floor.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TaskProfileError(f"{name} must be an int, got {type(value).__name__}")
+    if value < 1:
+        raise TaskProfileError(f"{name} must be >= 1, got {value}")
+    return value
+
+
 def _validate_observation_timestamp(name: str, value: float) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise InvalidObservationError(f"{name} must be a number, got {type(value).__name__}")
@@ -144,6 +158,30 @@ def _validate_observation_timestamp(name: str, value: float) -> float:
 def _validate_non_blank_str(name: str, value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidObservationError(f"{name} must be a non-empty, non-blank string")
+    return value
+
+
+def _require_blocked_report_str(name: str, value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidBlockedReportError(f"{name} must be a non-empty, non-blank string")
+    return value
+
+
+def _validate_str_tuple(name: str, value: tuple[str, ...]) -> tuple[str, ...]:
+    """A ``tuple[str, ...]`` boundary contract (Round 2 / H2/M9 pattern):
+    reject a bare string/list/None outright (no silent coercion, since
+    that would hide a caller bug), and reject any element that is not a
+    non-blank string. An empty tuple is valid unless the caller enforces
+    non-emptiness separately."""
+    if not isinstance(value, tuple):
+        raise InvalidBlockedReportError(
+            f"{name} must be a tuple[str, ...], got {type(value).__name__}"
+        )
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise InvalidBlockedReportError(
+                f"{name} must contain only non-blank strings, got {item!r}"
+            )
     return value
 
 
@@ -225,18 +263,43 @@ class TaskProfile:
 
 @dataclass(frozen=True)
 class ComplexityAssessment:
+    """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
+    M7) since it directly drives routing decisions. ``factors`` is an
+    internal, diagnostic breakdown for explainability/rationale text only
+    — conventionally each value is also in [0, 1] (analysis.py always
+    produces them that way), but it is not independently validated here,
+    since nothing downstream trusts individual factor values for a
+    routing/budget decision the way it trusts ``score``.
+    """
+
     score: float
     level: ComplexityLevel
     factors: dict[str, float] = field(default_factory=dict)
     rationale: str = ""
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "score", _validate_unit_interval("score", self.score))
+        if not isinstance(self.level, ComplexityLevel):
+            raise TaskProfileError(
+                f"level must be a ComplexityLevel, got {type(self.level).__name__}"
+            )
+
 
 @dataclass(frozen=True)
 class RiskAssessment:
+    """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
+    M7) — see ``ComplexityAssessment`` for why ``factors`` is left
+    unvalidated (diagnostic-only, not itself a routing input)."""
+
     score: float
     level: RiskLevel
     factors: dict[str, float] = field(default_factory=dict)
     rationale: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "score", _validate_unit_interval("score", self.score))
+        if not isinstance(self.level, RiskLevel):
+            raise TaskProfileError(f"level must be a RiskLevel, got {type(self.level).__name__}")
 
 
 # --------------------------------------------------------------------------
@@ -262,8 +325,22 @@ class AgentAssignment:
     count: int = 1
 
     def __post_init__(self) -> None:
-        if self.count < 1:
-            raise TaskProfileError(f"AgentAssignment.count must be >= 1, got {self.count}")
+        object.__setattr__(
+            self, "count", _validate_positive_int("AgentAssignment.count", self.count)
+        )
+        if not isinstance(self.role, AgentRole):
+            raise TaskProfileError(
+                f"AgentAssignment.role must be an AgentRole, got {type(self.role).__name__}"
+            )
+        if not isinstance(self.tier, ModelTier):
+            raise TaskProfileError(
+                f"AgentAssignment.tier must be a ModelTier, got {type(self.tier).__name__}"
+            )
+        if not isinstance(self.reasoning, ReasoningEffort):
+            raise TaskProfileError(
+                "AgentAssignment.reasoning must be a ReasoningEffort, got "
+                f"{type(self.reasoning).__name__}"
+            )
 
 
 @dataclass(frozen=True)
@@ -361,8 +438,44 @@ class RecoveryAttempt:
     at_seconds: float = 0.0
 
 
+class RecoveryEpisodeOutcome(str, Enum):
+    SUCCESS = "success"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class RecoveryEpisode:
+    """One closed STALL -> attempt(s) -> resolution cycle (Round 2 / C1).
+
+    Recovery-attempt counting and strategy selection are scoped to a
+    single episode (a fresh STALL after a successful recovery starts a
+    new episode with a clean attempt count); this record is the
+    execution-wide, never-reset audit trail of every episode that has
+    closed, independent of that per-episode operational state.
+    """
+
+    episode_number: int
+    stall_reason: str
+    attempts: tuple[RecoveryAttempt, ...]
+    outcome: RecoveryEpisodeOutcome
+    opened_at: float
+    closed_at: float
+
+
 @dataclass(frozen=True)
 class BlockedReport:
+    """AG-09/Round 2 M9: validated at this model boundary too, not only in
+    ``build_blocked_report`` -- ``BlockedReport`` is a public dataclass and
+    must not be constructible with a blank blocker/root_cause, a bool or
+    negative ``attempts``, or a non-``tuple[str, ...]`` collection field,
+    regardless of which constructor a caller uses.
+
+    ``attempts`` and ``len(strategies_tried)`` are deliberately NOT cross-
+    checked against each other: ``attempts`` counts recovery attempts made,
+    while ``strategies_tried`` is the distinct set of strategy names used
+    (a strategy can be retried), so they are not required to be equal.
+    """
+
     blocker: str
     root_cause: str
     last_successful_checkpoint: Checkpoint | None
@@ -371,6 +484,37 @@ class BlockedReport:
     evidence: tuple[str, ...]
     files_affected: tuple[str, ...]
     recommended_human_action: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "blocker", _require_blocked_report_str("blocker", self.blocker))
+        object.__setattr__(
+            self, "root_cause", _require_blocked_report_str("root_cause", self.root_cause)
+        )
+        if self.last_successful_checkpoint is not None and not isinstance(
+            self.last_successful_checkpoint, Checkpoint
+        ):
+            raise InvalidBlockedReportError(
+                "last_successful_checkpoint must be a Checkpoint or None, got "
+                f"{type(self.last_successful_checkpoint).__name__}"
+            )
+        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int):
+            raise InvalidBlockedReportError(
+                f"attempts must be an int, got {type(self.attempts).__name__}"
+            )
+        if self.attempts < 0:
+            raise InvalidBlockedReportError(f"attempts must be >= 0, got {self.attempts}")
+        object.__setattr__(
+            self, "strategies_tried", _validate_str_tuple("strategies_tried", self.strategies_tried)
+        )
+        object.__setattr__(self, "evidence", _validate_str_tuple("evidence", self.evidence))
+        object.__setattr__(
+            self, "files_affected", _validate_str_tuple("files_affected", self.files_affected)
+        )
+        object.__setattr__(
+            self,
+            "recommended_human_action",
+            _require_blocked_report_str("recommended_human_action", self.recommended_human_action),
+        )
 
 
 @dataclass(frozen=True)

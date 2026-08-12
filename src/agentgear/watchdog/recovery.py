@@ -9,8 +9,33 @@ that and transition the state machine to BLOCKED.
 
 ``LoopGuard`` implements the broader loop-protection bounds (principle
 #18): identical failures, recovery attempts, no-progress cycles, total
-attempts, and model escalations are all tracked and bounded independently,
-and none of these limits auto-increases itself to hide a stuck execution.
+attempts, and model escalations are all tracked, and none of these limits
+auto-increases itself to hide a stuck execution.
+
+Two different scopes of state (Round 2 / C1):
+
+* GLOBAL, execution-wide, NEVER reset by a successful recovery:
+  ``total_attempts``, ``model_escalations``. (Cumulative budget lives in
+  ``ExecutionBudgetLedger``, not here, and is equally never reset.)
+* RECOVERY-EPISODE-scoped, reset every time a NEW stall begins a fresh
+  episode: ``recovery_attempts``. A successful recovery closes the
+  episode; the next stall starts a new one with a clean attempt count —
+  see ``start_new_recovery_episode()``. This is what stops "STALL ->
+  recover -> STALL -> recover -> ..." from being treated as one
+  ever-growing recovery attempt count that eventually blocks a healthy,
+  repeatedly-self-healing execution for no real reason, while still
+  letting the *global* bounds (total attempts, cumulative budget) catch a
+  caller that abuses successful recovery to bypass real limits (Round 2 /
+  principle #7: episode counters may reset; global ones must not).
+
+Off-by-one contract (Round 2 / C2): every bound here means "N are
+allowed, N+1 is rejected" — ``max_recovery_attempts=1`` permits exactly
+one recovery attempt per episode, not zero. ``exceeded()`` reports a
+bound as violated only once its counter has gone *strictly past* the
+configured maximum; recovery-attempt admission is a separate, dedicated
+check (``can_start_recovery_attempt()``) rather than folded into
+``exceeded()``, so nothing else can reinterpret the same limit with
+different semantics.
 """
 
 from __future__ import annotations
@@ -70,7 +95,11 @@ class RecoveryEngine:
 @dataclass
 class LoopGuard:
     """Aggregates the loop-protection counters from ``WatchdogPolicy`` and
-    reports which bound(s), if any, have been exceeded.
+    reports which GLOBAL bound(s), if any, have been exceeded.
+    Recovery-attempt admission (episode-scoped) is handled by the
+    dedicated ``can_start_recovery_attempt`` family below, not by
+    ``exceeded()`` — see the module docstring for why the two are kept
+    separate.
     """
 
     policy: WatchdogPolicy
@@ -87,9 +116,6 @@ class LoopGuard:
     def record_identical_failure(self, *, is_repeat: bool) -> None:
         self.identical_failure_streak = self.identical_failure_streak + 1 if is_repeat else 0
 
-    def record_recovery_attempt(self) -> None:
-        self.recovery_attempts += 1
-
     def record_no_progress_cycle(self) -> None:
         self.no_progress_cycles += 1
 
@@ -99,35 +125,71 @@ class LoopGuard:
     def record_escalation(self) -> None:
         self.model_escalations += 1
 
+    # -- recovery-attempt admission: episode-scoped, "N allowed" (C2) ----
+
+    def can_start_recovery_attempt(self) -> bool:
+        """True if one more recovery attempt may begin in the CURRENT
+        episode. ``max_recovery_attempts=N`` permits exactly N attempts
+        per episode; the caller must check this BEFORE doing any work for
+        the attempt, then call ``record_recovery_attempt_started()`` only
+        once it actually commits to making the attempt — never the
+        increment-then-check ordering that caused the original off-by-one
+        (incrementing first made N=1 mean zero real attempts).
+        """
+        return self.recovery_attempts < self.policy.max_recovery_attempts
+
+    def recovery_attempts_remaining(self) -> int:
+        return max(0, self.policy.max_recovery_attempts - self.recovery_attempts)
+
+    def is_recovery_exhausted(self) -> bool:
+        return not self.can_start_recovery_attempt()
+
+    def record_recovery_attempt_started(self) -> None:
+        self.recovery_attempts += 1
+
+    def start_new_recovery_episode(self) -> None:
+        """Close out the previous recovery episode (if any) and reset
+        EPISODE-scoped state for a fresh one. Deliberately does NOT touch
+        ``total_attempts``, ``model_escalations``, or anything in the
+        execution's budget ledger — those are global and must keep
+        accumulating no matter how many times recovery succeeds
+        (Round 2 / principle #7: no global-limit bypass via repeated
+        successful episodes).
+        """
+        self.recovery_attempts = 0
+
+    # -- global bounds -----------------------------------------------------
+
     def exceeded(self) -> tuple[bool, tuple[str, ...]]:
+        """GLOBAL loop-protection bounds only (never episode-scoped
+        recovery attempts — see ``can_start_recovery_attempt``). Each
+        bound is violated only once its counter has gone strictly PAST
+        the configured maximum: ``max_total_attempts=N`` permits exactly
+        N attempts, the same "N allowed" contract as recovery attempts.
+        """
         p = self.policy
         reasons: list[str] = []
-        if self.identical_failure_streak >= p.max_identical_failures:
+        if self.identical_failure_streak > p.max_identical_failures:
             reasons.append(
-                f"identical_failure_streak={self.identical_failure_streak} >= "
+                f"identical_failure_streak={self.identical_failure_streak} > "
                 f"max_identical_failures={p.max_identical_failures}"
             )
-        if self.recovery_attempts >= p.max_recovery_attempts:
+        if self.no_progress_cycles > p.max_no_progress_cycles:
             reasons.append(
-                f"recovery_attempts={self.recovery_attempts} >= "
-                f"max_recovery_attempts={p.max_recovery_attempts}"
-            )
-        if self.no_progress_cycles >= p.max_no_progress_cycles:
-            reasons.append(
-                f"no_progress_cycles={self.no_progress_cycles} >= "
+                f"no_progress_cycles={self.no_progress_cycles} > "
                 f"max_no_progress_cycles={p.max_no_progress_cycles}"
             )
-        if self.total_attempts >= p.max_total_attempts:
+        if self.total_attempts > p.max_total_attempts:
             reasons.append(
-                f"total_attempts={self.total_attempts} >= max_total_attempts={p.max_total_attempts}"
+                f"total_attempts={self.total_attempts} > max_total_attempts={p.max_total_attempts}"
             )
         # max_model_escalations may legitimately be 0 (escalation disabled).
         # Only flag a violation once at least one escalation has actually
         # happened; a fresh guard must never report "exceeded" for work it
         # hasn't done yet.
-        if self.model_escalations > 0 and self.model_escalations >= p.max_model_escalations:
+        if self.model_escalations > 0 and self.model_escalations > p.max_model_escalations:
             reasons.append(
-                f"model_escalations={self.model_escalations} >= "
+                f"model_escalations={self.model_escalations} > "
                 f"max_model_escalations={p.max_model_escalations}"
             )
         return (bool(reasons), tuple(reasons))

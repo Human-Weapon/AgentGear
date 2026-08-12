@@ -65,6 +65,16 @@ def critical_signal_reasons(risk: RiskAssessment, policy: Policy) -> tuple[str, 
     blended risk score. A single maxed-out signal (e.g.
     ``security_impact=1.0`` on an otherwise trivial task) must not be
     diluted into a merely "low" blended score and routed cheaply.
+
+    Round 2 / L1: ``select_model_tier`` applies TWO deliberately separate
+    overrides -- this per-signal one, and a blended-score override
+    (``risk.score >= _CRITICAL_RISK_OVERRIDE``) a few lines below its call
+    site. They are not redundant: the blended override catches "risk is
+    high overall" even when no single factor is individually extreme,
+    while this one catches "one factor is extreme" even when the blend
+    dilutes it below any sane blended threshold. Merging them into one
+    check would reintroduce the exact dilution bug AG-03 exists to
+    prevent, so this is defense-in-depth, not accidental duplication.
     """
     cr = policy.critical_risk
     security = risk.factors.get("security_impact", 0.0)

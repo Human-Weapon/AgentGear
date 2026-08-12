@@ -18,6 +18,21 @@ Staffing policy (principle #8/#9):
 Every hard budget (``Policy.budget``) is enforced by raising
 ``BudgetExceededError`` rather than silently clamping or returning a
 plan that violates policy (principle #46).
+
+Round 2 / M4-M6: non-Builder roles get a FIXED reasoning effort
+(Planner=LOW, Researcher=MEDIUM, Judge=HIGH, Reviewer=MEDIUM), independent
+of the primary model's routed reasoning effort. This is deliberate, not a
+routing bug: each role's reasoning is sized to what that specific job
+needs (a Planner is sequencing already-decided work -- LOW is enough; a
+Judge is arbitrating conflicting proposals -- it needs HIGH), which is
+"minimum sufficient intelligence per role" (principle #6) rather than
+"every role inherits the Builder's reasoning level." A critical-risk task
+floors the Builder's own tier/reasoning via
+``CriticalRiskPolicy.min_tier``/``min_reasoning`` (routing.py), but does
+NOT re-floor the fixed-MEDIUM Reviewer -- if a future policy explicitly
+wants reviews of critical-risk work held to a higher bar than MEDIUM, that
+would need a new, explicit policy field, not an implicit coupling to the
+Builder's reasoning level.
 """
 
 from __future__ import annotations

@@ -98,7 +98,13 @@ class StallDetector:
         p = self.policy
 
         boundary = last_progress_at if last_progress_at is not None else started_at
-        since_boundary = [a for a in recent_activities if a.at_seconds >= boundary]
+        # Round 2 / M8/L8: strictly-after, matching progress.py's
+        # ``events_since`` contract ("activity at exactly the boundary is
+        # not considered new after it"). Using `>=` here would resurrect a
+        # stale activity recorded at exactly the progress/start instant as
+        # "since progress" the moment the boundary is set to that same
+        # timestamp, silently weakening the AG-02 boundary-reset guarantee.
+        since_boundary = [a for a in recent_activities if a.at_seconds > boundary]
 
         elapsed = max(0.0, now - boundary)
         time_exceeded = elapsed >= p.no_progress_seconds
@@ -123,6 +129,13 @@ class StallDetector:
                     f"(fingerprint={next(iter(fingerprints))!r})"
                 )
 
+        # Round 2 / L7: counts EVERY activity by fingerprint regardless of
+        # ``succeeded`` -- deliberately not filtered to failures only. An
+        # agent that keeps re-running the same successful-but-useless
+        # command (re-reading the same file, re-listing the same
+        # directory) over and over is exhibiting circular/busywork
+        # behavior just as much as one that keeps failing identically; a
+        # "successful" repeated no-op is not evidence of real progress.
         fingerprint_counts = Counter(a.fingerprint for a in since_boundary)
         for fingerprint, count in fingerprint_counts.items():
             if count >= max(3, p.max_identical_failures + 1):

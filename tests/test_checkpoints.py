@@ -114,3 +114,22 @@ def test_checkpoint_rejects_invalid_domain_data(kwargs: dict) -> None:
     base.update(kwargs)
     with pytest.raises(InvalidObservationError):
         Checkpoint(**base)
+
+
+# --- Round 2 / H4: schema-valid but domain-invalid content must quarantine
+
+
+def test_whitespace_only_last_good_state_is_quarantined_not_raised_raw(tmp_path) -> None:
+    """Regression for the exact H4 finding: a whitespace-only
+    last_good_state passes a naive "is it a string or null" structural
+    check, but Checkpoint's own domain validation rejects blank strings.
+    That must still become a quarantined CorruptStorageError, never a raw
+    InvalidObservationError escaping the persistence boundary."""
+    payload = [{"execution_id": "exec-1", "phase": "build", "last_good_state": "   "}]
+    _write_raw(tmp_path, "exec-1", payload)
+    store = CheckpointStore(tmp_path)
+
+    with pytest.raises(CorruptStorageError):
+        store.all("exec-1")
+
+    assert not (tmp_path / "exec-1.checkpoints.json").exists()

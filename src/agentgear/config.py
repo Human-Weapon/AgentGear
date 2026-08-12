@@ -88,6 +88,15 @@ class RoutingThresholds:
     """Score breakpoints (on a 0..1 combined complexity/risk score) that
     select a model tier. Each threshold is the minimum score required to
     reach that tier; FAST has an implicit threshold of 0.0.
+
+    Round 2 / M2: validation only requires ``standard_at <= advanced_at <=
+    frontier_at`` -- equal thresholds are deliberately allowed. Setting two
+    or more thresholds equal intentionally collapses the tiers between
+    them (e.g. ``standard_at == advanced_at`` means STANDARD is never
+    selected; a score that clears ``standard_at`` also clears
+    ``advanced_at`` and jumps straight to ADVANCED). This is a legitimate
+    way to run a simpler tier ladder without deleting a tier from
+    ``ModelTier`` itself.
     """
 
     standard_at: float = 0.25
@@ -337,6 +346,14 @@ class CriticalRiskPolicy:
     met, routing is floored at ``min_tier``/``min_reasoning`` and planning
     forces an independent review, regardless of what the blended
     complexity/risk score alone would have selected.
+
+    Round 2 / M1: the floor for each ``*_at`` threshold is ``0.0``, not
+    some epsilon above it -- a deployer running an extremely risk-averse
+    policy MAY deliberately set e.g. ``security_impact_at=0.0`` so that
+    *any* nonzero security signal at all forces the floor. That is valid
+    configuration, not a bug: nothing about "critical" requires the
+    threshold to be close to 1.0, only that crossing it always means what
+    the deployer intends it to mean.
     """
 
     security_impact_at: float = 0.85
@@ -364,7 +381,16 @@ class CriticalRiskPolicy:
 
 @dataclass(frozen=True)
 class Policy:
-    """Top-level AgentGear configuration."""
+    """Top-level AgentGear configuration.
+
+    Round 2 / M3: ``multi_agent_risk_threshold`` and
+    ``multi_agent_complexity_threshold`` are validated only to lie in
+    ``[0.0, 1.0]``. A deployer may deliberately set one to ``0.0`` so that
+    the corresponding score (which is always ``>= 0.0``) unconditionally
+    forces multi-agent staffing -- e.g. an org policy that every task,
+    however trivial, gets more than a lone Builder. That is valid
+    configuration, not a bug.
+    """
 
     routing_weights: RoutingWeights = field(default_factory=RoutingWeights)
     routing_thresholds: RoutingThresholds = field(default_factory=RoutingThresholds)

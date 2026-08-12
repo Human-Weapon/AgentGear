@@ -10,14 +10,21 @@ must be a list of well-formed checkpoint objects; anything else (``{}``,
 a bare object instead of a list, missing fields, wrong types) is
 quarantined and reported as ``CorruptStorageError`` rather than raising a
 raw ``KeyError``/``TypeError`` out of ``all()``/``latest()``.
+
+Round 2 / H4: ``_construct_entry`` is the ONE authoritative dict ->
+domain-``Checkpoint`` path — used both as the persistence-layer schema
+validator and as the deserializer — so a schema-valid-but-domain-invalid
+entry (e.g. a whitespace-only ``last_good_state``) cannot escape as a raw
+``InvalidObservationError``; every failure mode normalizes to
+``ValueError`` for ``SafeJsonStore``'s single quarantine path.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
+from .exceptions import InvalidObservationError
 from .models import Checkpoint
 from .safe_json_store import SafeJsonStore
 
@@ -35,50 +42,42 @@ def _to_dict(cp: Checkpoint) -> dict:
     }
 
 
-def _validate_entry_schema(entry: Any, index: int) -> dict:
+def _construct_entry(entry: Any, index: int) -> Checkpoint:
+    """The ONE authoritative dict -> domain-``Checkpoint`` path (H4)."""
     if not isinstance(entry, dict):
         raise ValueError(f"checkpoint[{index}] must be an object, got {type(entry).__name__}")
 
     for field_name in ("execution_id", "phase"):
         if field_name not in entry:
             raise ValueError(f"checkpoint[{index}] is missing required field '{field_name}'")
-        if not isinstance(entry[field_name], str) or not entry[field_name].strip():
-            raise ValueError(f"checkpoint[{index}].{field_name} must be a non-empty string")
 
     for field_name in ("completed", "pending"):
         value = entry.get(field_name, [])
-        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        if not isinstance(value, list):
             raise ValueError(f"checkpoint[{index}].{field_name} must be a list of strings")
 
-    last_good_state = entry.get("last_good_state")
-    if last_good_state is not None and not isinstance(last_good_state, str):
-        raise ValueError(f"checkpoint[{index}].last_good_state must be a string or null")
+    try:
+        return Checkpoint(
+            execution_id=entry["execution_id"],
+            phase=entry["phase"],
+            completed=tuple(entry.get("completed", ())),
+            pending=tuple(entry.get("pending", ())),
+            last_good_state=entry.get("last_good_state"),
+            at_seconds=entry.get("at_seconds", 0.0),
+        )
+    except (InvalidObservationError, TypeError) as exc:
+        raise ValueError(f"checkpoint[{index}]: {exc}") from exc
 
-    at_seconds = entry.get("at_seconds", 0.0)
-    if isinstance(at_seconds, bool) or not isinstance(at_seconds, (int, float)):
-        raise ValueError(f"checkpoint[{index}].at_seconds must be a number")
-    if not math.isfinite(at_seconds) or at_seconds < 0:
-        raise ValueError(f"checkpoint[{index}].at_seconds must be a finite non-negative number")
 
-    return entry
-
-
-def _validate_history_schema(data: Any) -> list[dict]:
+def _validate_history_schema(data: Any) -> Any:
+    """``SafeJsonStore`` validator: construct every entry purely to
+    validate it, then return the ORIGINAL data so the on-disk
+    representation stays plain JSON."""
     if not isinstance(data, list):
         raise ValueError(f"checkpoint history must be a list, got {type(data).__name__}")
-    return [_validate_entry_schema(entry, i) for i, entry in enumerate(data)]
-
-
-def _from_dict(data: Any, index: int) -> Checkpoint:
-    data = _validate_entry_schema(data, index)
-    return Checkpoint(
-        execution_id=data["execution_id"],
-        phase=data["phase"],
-        completed=tuple(data.get("completed", ())),
-        pending=tuple(data.get("pending", ())),
-        last_good_state=data.get("last_good_state"),
-        at_seconds=data.get("at_seconds", 0.0),
-    )
+    for i, entry in enumerate(data):
+        _construct_entry(entry, i)
+    return data
 
 
 class CheckpointStore:
@@ -113,7 +112,7 @@ class CheckpointStore:
         if data is _MISSING:
             return []
         try:
-            return [_from_dict(entry, i) for i, entry in enumerate(data)]
+            return [_construct_entry(entry, i) for i, entry in enumerate(data)]
         except (ValueError, KeyError, TypeError) as exc:
             store.quarantine_invalid(f"invalid checkpoint schema for {execution_id!r}: {exc}")
             raise

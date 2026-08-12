@@ -96,18 +96,25 @@ def test_scenario_d_recovery_exhausted_reaches_blocked() -> None:
     guard = LoopGuard(policy=policy)
     tried: list[str] = []
     last_exc: RecoveryExhaustedError | None = None
-    for attempt in range(1, 5):
-        guard.record_recovery_attempt()
+    attempt = 0
+    while guard.can_start_recovery_attempt():
+        attempt += 1
         try:
             strategy = engine.next_strategy(tried_strategies=tuple(tried), attempt_number=attempt)
         except RecoveryExhaustedError as exc:
             last_exc = exc
             break
+        guard.record_recovery_attempt_started()
         tried.append(strategy)  # every attempt "fails" in this adversarial scenario
+    if last_exc is None:
+        # Attempts allowed by max_recovery_attempts were exhausted before
+        # the strategy ladder itself ran out.
+        assert guard.is_recovery_exhausted() is True
+        last_exc = RecoveryExhaustedError(
+            f"recovery_attempts exhausted at max_recovery_attempts={policy.max_recovery_attempts}"
+        )
 
-    assert last_exc is not None
-    exceeded, reasons = guard.exceeded()
-    assert exceeded is True
+    assert len(tried) == policy.max_recovery_attempts
 
     sm.transition(ExecutionState.BLOCKED, at_seconds=10.0, note=str(last_exc))
     assert sm.state == ExecutionState.BLOCKED

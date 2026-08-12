@@ -45,6 +45,23 @@ class ContextRequest:
             raise ConfigurationError("ContextRequest.budget_tokens must be an int")
         if self.budget_tokens <= 0:
             raise ConfigurationError("ContextRequest.budget_tokens must be > 0")
+        # Round 2 / H2: constraints has an explicit, strict type contract.
+        # A bare string is iterable character-by-character and would
+        # silently corrupt any code that does `for c in constraints`, so
+        # it is rejected exactly like any other wrong type rather than
+        # coerced into a one-element tuple -- coercion would hide a real
+        # caller bug instead of surfacing it.
+        if not isinstance(self.constraints, tuple):
+            raise ConfigurationError(
+                "ContextRequest.constraints must be a tuple[str, ...], got "
+                f"{type(self.constraints).__name__}"
+            )
+        for item in self.constraints:
+            if not isinstance(item, str) or not item.strip():
+                raise ConfigurationError(
+                    "ContextRequest.constraints must contain only non-empty, non-blank strings, "
+                    f"got {item!r}"
+                )
 
 
 @dataclass(frozen=True)

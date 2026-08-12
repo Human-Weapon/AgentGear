@@ -203,3 +203,37 @@ def test_ag03_critical_thresholds_are_configurable() -> None:
     plan = _plan(profile, strict)
     assert plan.primary_model.tier.rank >= strict.critical_risk.min_tier.rank
     assert plan.review_required is True
+
+
+# --- Round 2 / L2: individual factor-dict keys must be correctly wired ----
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ambiguity": 0.6},
+        {"architectural_impact": 0.6},
+        {"prior_failures": 5},
+    ],
+)
+def test_l2_individual_factor_key_forces_multi_agent_below_blended_thresholds(
+    kwargs: dict, policy: Policy
+) -> None:
+    """``build_execution_strategy`` reads
+    ``complexity.factors.get("ambiguity"/"architectural_impact", 0.0)`` and
+    ``risk.factors.get("prior_failures", 0.0)`` -- a typo'd key would
+    silently fall back to that 0.0 default instead of raising, so the
+    individual-signal trigger would vanish without error. Each kwarg here
+    isolates exactly ONE factor high enough to cross its own threshold
+    while both BLENDED complexity and risk scores stay under their own
+    multi-agent thresholds, so ``agent_count > 1`` can only be explained by
+    the individually-keyed factor, not by the blended-score path.
+    """
+    profile = TaskProfile(description="isolated single-factor signal", **kwargs)
+    c = assess_complexity(profile)
+    r = assess_risk(profile)
+    assert c.score < policy.multi_agent_complexity_threshold
+    assert r.score < policy.multi_agent_risk_threshold
+
+    plan = build_execution_plan(profile, c, r, policy)
+    assert plan.strategy.agent_count > 1

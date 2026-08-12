@@ -273,6 +273,55 @@ def test_ag02_no_progress_attempt_count_only_counts_after_boundary() -> None:
     assert not any("no progress" in r for r in verdict.reasons)
 
 
+# --- Round 2 / M8/L8: timestamp boundary contract must match progress.py --
+
+
+def test_m8_activity_exactly_at_progress_boundary_is_excluded() -> None:
+    """``ProgressTracker.events_since`` (progress.py) treats an event AT
+    the boundary timestamp T as NOT new (``at_seconds > T``). Stall
+    detection must apply the identical contract to raw activity, or a
+    stale failure at exactly the progress boundary gets resurrected as
+    "since progress" the instant progress resets the clock, silently
+    weakening AG-02. Only ONE genuinely new failure exists strictly after
+    T=3.0, so with max_identical_failures=2 this must NOT stall."""
+    detector = StallDetector(_policy(max_identical_failures=2))
+    activities = [
+        ActivityRecord(at_seconds=3.0, fingerprint="run-tests", succeeded=False),  # AT boundary
+        ActivityRecord(at_seconds=4.0, fingerprint="run-tests", succeeded=False),  # after boundary
+    ]
+    verdict = detector.evaluate(
+        now=5.0, started_at=0.0, last_progress_at=3.0, recent_activities=activities
+    )
+    assert not any("identical failures" in r for r in verdict.reasons)
+
+
+def test_m8_activity_strictly_after_progress_boundary_still_counts() -> None:
+    """The exact-boundary exclusion must not overreach: two genuinely new
+    failures strictly after the boundary must still stall."""
+    detector = StallDetector(_policy(max_identical_failures=2))
+    activities = [
+        ActivityRecord(at_seconds=3.0, fingerprint="run-tests", succeeded=False),  # AT boundary
+        ActivityRecord(at_seconds=4.0, fingerprint="run-tests", succeeded=False),
+        ActivityRecord(at_seconds=5.0, fingerprint="run-tests", succeeded=False),
+    ]
+    verdict = detector.evaluate(
+        now=6.0, started_at=0.0, last_progress_at=3.0, recent_activities=activities
+    )
+    assert any("identical failures" in r for r in verdict.reasons)
+
+
+def test_m8_boundary_contract_holds_for_sub_second_floats() -> None:
+    detector = StallDetector(_policy(max_identical_failures=2))
+    activities = [
+        ActivityRecord(at_seconds=3.123456, fingerprint="run-tests", succeeded=False),
+        ActivityRecord(at_seconds=3.123457, fingerprint="run-tests", succeeded=False),
+    ]
+    verdict = detector.evaluate(
+        now=5.0, started_at=0.0, last_progress_at=3.123456, recent_activities=activities
+    )
+    assert not any("identical failures" in r for r in verdict.reasons)
+
+
 # --- AG-06: ActivityRecord must not accept bogus/invalid signals -----------
 
 

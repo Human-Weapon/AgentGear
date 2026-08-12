@@ -181,3 +181,55 @@ def test_heartbeat_rejects_invalid_domain_data_before_it_reaches_storage() -> No
             current_strategy=None,
             last_error=None,
         )
+
+
+# --- Round 2 / H4: schema-valid but domain-invalid content must quarantine
+
+
+def test_whitespace_only_nullable_field_is_quarantined_not_raised_raw(tmp_path) -> None:
+    """Regression for the exact H4 finding: a whitespace-only
+    current_subtask passes a naive "is it a string or null" structural
+    check, but Heartbeat's own domain validation rejects blank strings.
+    That must still become a quarantined CorruptStorageError, never a raw
+    InvalidObservationError escaping the persistence boundary."""
+    payload = {
+        "execution_id": "exec-1",
+        "state": "running",
+        "current_task": "x",
+        "current_subtask": "   ",
+        "last_real_progress_at": 0.0,
+        "last_progress_evidence": None,
+        "attempt_count": 0,
+        "current_strategy": None,
+        "last_error": None,
+        "pending_work": [],
+    }
+    _write_raw(tmp_path, "exec-1", payload)
+    writer = HeartbeatWriter(tmp_path)
+
+    with pytest.raises(CorruptStorageError):
+        writer.read("exec-1")
+
+    # the malformed file must be gone (quarantined), never left in place.
+    assert not (tmp_path / "exec-1.heartbeat.json").exists()
+
+
+def test_cli_status_on_domain_invalid_heartbeat_exits_cleanly(tmp_path) -> None:
+    from agentgear.cli import main
+
+    payload = {
+        "execution_id": "exec-1",
+        "state": "running",
+        "current_task": "x",
+        "current_subtask": "   ",
+        "last_real_progress_at": 0.0,
+        "last_progress_evidence": None,
+        "attempt_count": 0,
+        "current_strategy": None,
+        "last_error": None,
+        "pending_work": [],
+    }
+    _write_raw(tmp_path, "exec-1", payload)
+
+    code = main(["status", "--state-dir", str(tmp_path), "--execution-id", "exec-1"])
+    assert code == 1

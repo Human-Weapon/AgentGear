@@ -51,6 +51,17 @@ def _risk_level(score: float) -> RiskLevel:
 # they define what "complexity" and "risk" *mean* domain-wide, whereas
 # Policy controls what to *do* once a score is known (tier thresholds,
 # budgets, watchdog bounds).
+#
+# Round 2 / L3: ``architectural_impact`` appears in BOTH weight dicts
+# below. This is intentional, not double-counting a single signal into an
+# inflated combined score: complexity and risk are two independently
+# consumed scores (routing uses each with its own weight blend and its
+# own threshold set; planning reads each dict's "architectural_impact"
+# entry directly for its own independent Planner-staffing decision). A
+# large architectural change is legitimately BOTH more complex to build
+# AND riskier to get wrong -- collapsing it out of one dict to avoid the
+# appearance of duplication would make one of those two assessments blind
+# to a real, relevant signal.
 _COMPLEXITY_WEIGHTS = {
     "files_affected": 0.20,
     "modules_affected": 0.20,

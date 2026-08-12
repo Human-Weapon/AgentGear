@@ -22,6 +22,38 @@ def test_context_request_rejects_non_positive_budget() -> None:
         ContextRequest(topic="auth", budget_tokens=0)
 
 
+# --- Round 2 / H2: constraints has a strict tuple[str, ...] contract ------
+
+
+@pytest.mark.parametrize(
+    "bad_constraints",
+    [
+        "no_pii",  # a bare string is iterable char-by-char -- must be rejected, not coerced
+        ["no_pii"],
+        42,
+        None,
+        ("valid", 3),
+        ("",),
+        ("   ",),
+    ],
+)
+def test_context_request_rejects_invalid_constraints_shape(bad_constraints) -> None:
+    with pytest.raises(ConfigurationError):
+        ContextRequest(topic="auth", budget_tokens=100, constraints=bad_constraints)
+
+
+def test_context_request_accepts_well_formed_constraints_tuple() -> None:
+    request = ContextRequest(
+        topic="auth", budget_tokens=100, constraints=("no_pii", "redact_emails")
+    )
+    assert request.constraints == ("no_pii", "redact_emails")
+
+
+def test_context_request_default_constraints_is_empty_tuple() -> None:
+    request = ContextRequest(topic="auth", budget_tokens=100)
+    assert request.constraints == ()
+
+
 def test_default_provider_returns_empty_content_with_explanatory_note() -> None:
     provider = DefaultContextProvider()
     package = provider.request(ContextRequest(topic="auth", budget_tokens=1000))

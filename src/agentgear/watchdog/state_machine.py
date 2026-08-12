@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..exceptions import InvalidStateTransitionError, NotCompletedError
+from ..exceptions import InvalidObservationError, InvalidStateTransitionError, NotCompletedError
 from ..models import ExecutionState
 
 _ALLOWED: dict[ExecutionState, frozenset[ExecutionState]] = {
@@ -51,6 +51,13 @@ class TransitionRecord:
     to_state: ExecutionState
     at_seconds: float
     note: str = ""
+    # Round 2 / H3: evidence supplied at transition time (validated for
+    # COMPLETED, accepted generically for any other transition) used to be
+    # discarded after the COMPLETED check passed. It is now preserved
+    # here so the authoritative history remains auditable -- a generic
+    # field on the one TransitionRecord shape, not a COMPLETED-only
+    # special case.
+    evidence: tuple[str, ...] = ()
 
 
 @dataclass
@@ -84,19 +91,33 @@ class ExecutionStateMachine:
                 f"previous transition's at_seconds={self.history[-1].at_seconds}; transitions "
                 "must be reported in non-decreasing time order"
             )
-        if target == ExecutionState.COMPLETED:
-            clean_evidence = [e for e in evidence if isinstance(e, str) and e.strip()]
-            if not clean_evidence:
-                raise NotCompletedError(
-                    f"execution '{self.execution_id}': cannot transition to COMPLETED without "
-                    "non-empty evidence of satisfied acceptance criteria"
-                )
+        if not isinstance(evidence, tuple):
+            raise InvalidObservationError(
+                f"evidence must be a tuple[str, ...], got {type(evidence).__name__}"
+            )
+        clean_evidence = tuple(e for e in evidence if isinstance(e, str) and e.strip())
+        if target == ExecutionState.COMPLETED and not clean_evidence:
+            raise NotCompletedError(
+                f"execution '{self.execution_id}': cannot transition to COMPLETED without "
+                "non-empty evidence of satisfied acceptance criteria"
+            )
         record = TransitionRecord(
-            from_state=self.state, to_state=target, at_seconds=at_seconds, note=note
+            from_state=self.state,
+            to_state=target,
+            at_seconds=at_seconds,
+            note=note,
+            evidence=clean_evidence,
         )
         self.history.append(record)
         self.state = target
 
     @property
     def is_terminal(self) -> bool:
+        """Round 2 / L5: BLOCKED is deliberately NOT terminal. Unlike
+        COMPLETED (which has no outgoing transitions at all, see
+        ``_ALLOWED``), BLOCKED -> RECOVERING is a legal transition -- a
+        human can review the ``BlockedReport``, address the root cause,
+        and let the execution resume. Only COMPLETED represents "this
+        execution is genuinely done."
+        """
         return self.state == ExecutionState.COMPLETED

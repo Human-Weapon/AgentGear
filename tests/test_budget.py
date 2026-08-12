@@ -134,3 +134,78 @@ def test_reserve_rejects_negative_tokens_or_cost() -> None:
         ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=-1, cost=0.1)
     with pytest.raises(ConfigurationError):
         ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=10, cost=-0.1)
+
+
+# --- Round 2 / Section 17: full reserve/commit/release transaction matrix -
+
+
+def test_release_after_commit_is_rejected_a() -> None:
+    """A: reserve -> commit -> release must reject the release (this is
+    also covered indirectly by test_committed_reservation_cannot_be_released_
+    _to_bypass_hard_budget above; kept here to sit alongside its siblings
+    B/C/D for the full transaction matrix)."""
+    ledger = ExecutionBudgetLedger(max_tokens=1000, max_cost=1.0)
+    r = ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=100, cost=0.1)
+    ledger.commit(r.reservation_id)
+    with pytest.raises(BudgetExceededError):
+        ledger.release(r.reservation_id)
+    assert ledger.committed_tokens == 100
+
+
+def test_commit_after_release_is_rejected_b() -> None:
+    """B: reserve -> release -> commit must reject the commit. A released
+    reservation is gone; it cannot be resurrected as spent."""
+    ledger = ExecutionBudgetLedger(max_tokens=1000, max_cost=1.0)
+    r = ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=100, cost=0.1)
+    ledger.release(r.reservation_id)
+    with pytest.raises(BudgetExceededError):
+        ledger.commit(r.reservation_id)
+    assert ledger.committed_tokens == 0
+    assert ledger.reserved_tokens == 0
+    assert ledger.remaining_tokens == 1000
+
+
+def test_double_commit_is_rejected_c() -> None:
+    """C: committing an already-committed reservation must be rejected --
+    otherwise nothing actually enforces "committed" as a terminal state."""
+    ledger = ExecutionBudgetLedger(max_tokens=1000, max_cost=1.0)
+    r = ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=100, cost=0.1)
+    ledger.commit(r.reservation_id)
+    with pytest.raises(BudgetExceededError):
+        ledger.commit(r.reservation_id)
+    assert ledger.committed_tokens == 100  # not double-counted
+
+
+def test_double_release_is_rejected_d() -> None:
+    """D: releasing an already-released reservation must be rejected --
+    otherwise the ledger's total in-use accounting is just informational
+    text, not an enforced invariant."""
+    ledger = ExecutionBudgetLedger(max_tokens=1000, max_cost=1.0)
+    r = ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=100, cost=0.1)
+    ledger.release(r.reservation_id)
+    with pytest.raises(BudgetExceededError):
+        ledger.release(r.reservation_id)
+    assert ledger.remaining_tokens == 1000  # not double-freed
+
+
+def test_releasing_unknown_reservation_raises() -> None:
+    ledger = ExecutionBudgetLedger(max_tokens=100, max_cost=1.0)
+    with pytest.raises(BudgetExceededError):
+        ledger.release("res-does-not-exist")
+
+
+def test_reserve_then_commit_is_atomic_no_window_for_a_leaked_reservation() -> None:
+    """F/G: AgentGear's only caller pattern (ExecutionWatchdog.begin_recovery)
+    always calls ``commit()`` synchronously, immediately after a successful
+    ``reserve()``, with no other fallible operation between them -- so
+    there is no code path where a reservation can be left dangling in
+    RESERVED state after the operation it was reserved for has already
+    started. This test locks in that ``commit()`` right after ``reserve()``
+    is always legal (the precondition the coordinator's code relies on),
+    so a future change to reservation-state transitions can't silently
+    break that assumption."""
+    ledger = ExecutionBudgetLedger(max_tokens=1000, max_cost=1.0)
+    r = ledger.reserve(kind=ReservationKind.RECOVERY, tokens=100, cost=0.1)
+    assert r.state == ReservationState.RESERVED
+    ledger.commit(r.reservation_id)  # must never raise immediately after reserve()
+    assert ledger.committed_tokens == 100

@@ -42,6 +42,8 @@ from ..models import (
     ProgressSignalKind,
     ReasoningEffort,
     RecoveryAttempt,
+    RecoveryEpisode,
+    RecoveryEpisodeOutcome,
     RecoveryResult,
 )
 from ..routing import estimate_cost
@@ -50,7 +52,7 @@ from .heartbeat import HeartbeatWriter, build_heartbeat
 from .progress import ProgressTracker
 from .recovery import LoopGuard, RecoveryEngine
 from .stall_detection import ActivityRecord, StallDetector
-from .state_machine import ExecutionStateMachine
+from .state_machine import ExecutionStateMachine, TransitionRecord
 
 _ACTIVE_STATES = (ExecutionState.RUNNING, ExecutionState.TESTING, ExecutionState.REVIEWING)
 _RECOVERY_RESUME_STATES = (
@@ -112,8 +114,19 @@ class ExecutionWatchdog:
 
         self._activities: list[ActivityRecord] = []
         self._checkpoints: list[Checkpoint] = []
+        # EPISODE-scoped (Round 2 / C1): reset by _start_new_recovery_episode()
+        # whenever a fresh STALL begins after the previous episode closed.
+        # Never read these for anything that must survive across episodes —
+        # use self._recovery_history (below) or the LoopGuard's global
+        # counters (total_attempts, model_escalations) for that.
         self._recovery_attempts: list[RecoveryAttempt] = []
         self._tried_strategies: tuple[str, ...] = ()
+        self._episode_number: int = 0
+        self._episode_opened_at: float | None = None
+        self._episode_stall_reason: str = ""
+        # GLOBAL, execution-wide audit trail of every CLOSED episode.
+        # Never cleared, never shrunk.
+        self._recovery_history: list[RecoveryEpisode] = []
         self._blocked_report: BlockedReport | None = None
         self._started_at: float | None = None
         self._last_observed_at: float | None = None
@@ -201,7 +214,10 @@ class ExecutionWatchdog:
     ) -> BlockedReport:
         """The ONLY path to BLOCKED. Always builds and validates a
         BlockedReport (AG-09) before the state machine transition, and
-        the coordinator never exposes any other way to reach BLOCKED.
+        the coordinator never exposes any other way to reach BLOCKED. This
+        also closes the current recovery episode (Round 2 / C1) with a
+        BLOCKED outcome, using this episode's own attempts/strategies —
+        never the full execution-wide history.
         """
         report = build_blocked_report(
             blocker=blocker,
@@ -214,10 +230,43 @@ class ExecutionWatchdog:
             files_affected=files_affected,
         )
         self._blocked_report = report
+        self._close_recovery_episode(outcome=RecoveryEpisodeOutcome.BLOCKED, at_seconds=at_seconds)
         self._sm.transition(ExecutionState.BLOCKED, at_seconds=at_seconds, note=blocker)
         self._last_error = blocker
         self._write_heartbeat(at_seconds)
         return report
+
+    def _open_new_recovery_episode(self, *, at_seconds: float, stall_reason: str) -> None:
+        """Start a fresh recovery episode (Round 2 / C1): the episode's
+        own attempt count and tried-strategy list reset to empty, and the
+        loop guard's episode-scoped ``recovery_attempts`` counter resets
+        with it. Deliberately never touches anything global (total
+        attempts, model escalations, the budget ledger, or the
+        execution-wide ``_recovery_history`` audit trail) — see
+        ``recovery.LoopGuard`` for the full scope rationale.
+        """
+        self._episode_number += 1
+        self._episode_opened_at = at_seconds
+        self._episode_stall_reason = stall_reason
+        self._recovery_attempts = []
+        self._tried_strategies = ()
+        self._loop_guard.start_new_recovery_episode()
+
+    def _close_recovery_episode(
+        self, *, outcome: RecoveryEpisodeOutcome, at_seconds: float
+    ) -> None:
+        if self._episode_opened_at is None:
+            return
+        self._recovery_history.append(
+            RecoveryEpisode(
+                episode_number=self._episode_number,
+                stall_reason=self._episode_stall_reason,
+                attempts=tuple(self._recovery_attempts),
+                outcome=outcome,
+                opened_at=self._episode_opened_at,
+                closed_at=at_seconds,
+            )
+        )
 
     # -- public lifecycle API -------------------------------------------
 
@@ -354,6 +403,12 @@ class ExecutionWatchdog:
         self._last_error = reasons
         self._loop_guard.record_no_progress_cycle()
         self._sm.transition(ExecutionState.STALLED, at_seconds=at_seconds, note=reasons)
+        # This is always a FRESH stall (evaluate() only runs from an ACTIVE
+        # state), so it always opens a new recovery episode — never a
+        # continuation. A retry within the SAME episode instead goes
+        # through record_recovery_result()'s FAILURE branch, which routes
+        # RECOVERING -> STALLED directly and does NOT open a new episode.
+        self._open_new_recovery_episode(at_seconds=at_seconds, stall_reason=reasons)
         self._write_heartbeat(at_seconds)
         self.begin_recovery(at_seconds=at_seconds, reason="stall_detected")
 
@@ -371,11 +426,19 @@ class ExecutionWatchdog:
                 f"begin_recovery requires STALLED, current state is {self._sm.state.value}"
             )
 
-        self._loop_guard.record_recovery_attempt()
+        # Check-then-act (Round 2 / C2): admission is decided BEFORE any
+        # counter is incremented, so max_recovery_attempts=N genuinely
+        # permits N attempts in this episode, never N-1. Global bounds
+        # (total attempts, model escalations) are checked independently —
+        # either one blocks.
         exceeded, guard_reasons = self._loop_guard.exceeded()
-        attempt_number = len(self._recovery_attempts) + 1
-
-        if exceeded:
+        if exceeded or not self._loop_guard.can_start_recovery_attempt():
+            if not exceeded:
+                guard_reasons = (
+                    f"recovery_attempts={self._loop_guard.recovery_attempts} >= "
+                    f"max_recovery_attempts={self.policy.watchdog.max_recovery_attempts} "
+                    "for this episode",
+                )
             self._sm.transition(ExecutionState.RECOVERING, at_seconds=at_seconds, note=reason)
             self._transition_to_blocked(
                 at_seconds=at_seconds,
@@ -383,6 +446,8 @@ class ExecutionWatchdog:
                 root_cause="; ".join(guard_reasons),
             )
             return None
+
+        attempt_number = len(self._recovery_attempts) + 1
 
         try:
             strategy = self._recovery_engine.next_strategy(
@@ -414,6 +479,10 @@ class ExecutionWatchdog:
             return None
         self.budget.commit(reservation.reservation_id)
 
+        # Only now, having actually committed to making this attempt, does
+        # it count against the episode's admission gate (C2: increment
+        # AFTER the decision to proceed, never before).
+        self._loop_guard.record_recovery_attempt_started()
         self._tried_strategies = (*self._tried_strategies, strategy)
         attempt = RecoveryAttempt(
             reason=reason,
@@ -475,6 +544,14 @@ class ExecutionWatchdog:
 
         if result == RecoveryResult.SUCCESS:
             progress_description = evidence or f"recovered via {last.strategy}"
+            # Close this recovery episode as a SUCCESS (Round 2 / C1)
+            # BEFORE the transition: the very next stall (if any) opens a
+            # brand new episode with a clean attempt count, but this
+            # episode's own history is preserved in _recovery_history
+            # exactly as it stood at the moment of success.
+            self._close_recovery_episode(
+                outcome=RecoveryEpisodeOutcome.SUCCESS, at_seconds=at_seconds
+            )
             self._sm.transition(
                 resume_state,
                 at_seconds=at_seconds,
@@ -583,6 +660,24 @@ class ExecutionWatchdog:
     def blocked_report(self) -> BlockedReport | None:
         return self._blocked_report
 
+    @property
+    def recovery_history(self) -> tuple[RecoveryEpisode, ...]:
+        """Every CLOSED recovery episode this execution has ever had,
+        oldest first. Never cleared, never shrunk — the audit trail
+        survives regardless of how many episodes later succeeded
+        (Round 2 / C1)."""
+        return tuple(self._recovery_history)
+
+    @property
+    def transition_history(self) -> tuple[TransitionRecord, ...]:
+        """The full, ordered state-transition history, including the
+        evidence supplied at each transition (Round 2 / H3) — the
+        authoritative record of what evidence justified reaching
+        COMPLETED (or any other transition), retrievable through the
+        public coordinator without reaching into private internals.
+        """
+        return tuple(self._sm.history)
+
     def status(self) -> dict[str, object]:
         return {
             "execution_id": self.execution_id,
@@ -594,7 +689,13 @@ class ExecutionWatchdog:
             "attempt_count": len(self._activities),
             "started_at": self._started_at,
             "last_progress_at": self._progress.last_progress_at,
+            # Current/most-recent episode's own attempt count (resets to 0
+            # each time a new episode opens) -- NOT a lifetime total.
             "recovery_attempts": len(self._recovery_attempts),
+            "recovery_episode_number": self._episode_number,
+            "recovery_episodes_completed": len(self._recovery_history),
+            "recovery_history": self.recovery_history,
+            "total_attempts": self._loop_guard.total_attempts,
             "budget": self.budget.status(),
             "blocked_report": self._blocked_report,
             "latest_checkpoint": self._checkpoints[-1] if self._checkpoints else None,

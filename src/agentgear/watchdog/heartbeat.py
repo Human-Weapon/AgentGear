@@ -11,26 +11,30 @@ parseable JSON but doesn't match the expected schema (``{}``, ``[]``,
 missing fields, wrong types, an unrecognized ``ExecutionState`` value) is
 quarantined and reported as ``CorruptStorageError`` — never as a raw
 ``KeyError``/``ValueError`` leaking out of a read.
+
+Round 2 / H4: schema-valid JSON can still be domain-invalid (e.g. a
+whitespace-only ``current_subtask`` passes a naive "is it a string"
+structural check but fails ``Heartbeat``'s own non-blank invariant). A
+structural pre-check that doesn't also attempt real domain construction
+can let that gap through as a raw ``InvalidObservationError`` instead of
+a quarantined ``CorruptStorageError``. ``_construct`` is the ONE
+authoritative path from a raw dict to a domain ``Heartbeat`` — used both
+as the persistence-layer schema validator and as the deserializer — so
+there is no second, independently-drifting set of rules, and every
+failure mode (structural or domain-level) normalizes to ``ValueError``
+for ``SafeJsonStore``'s single quarantine path to catch.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
+from ..exceptions import InvalidObservationError
 from ..models import ExecutionState, Heartbeat
 from ..safe_json_store import SafeJsonStore
 
 _MISSING = object()
-
-_REQUIRED_STRING_FIELDS = ("execution_id", "current_task")
-_REQUIRED_NULLABLE_STRING_FIELDS = (
-    "current_subtask",
-    "last_progress_evidence",
-    "current_strategy",
-    "last_error",
-)
 
 
 def build_heartbeat(
@@ -75,68 +79,58 @@ def _to_dict(hb: Heartbeat) -> dict:
     }
 
 
-def _validate_schema(data: Any) -> dict:
-    """Raise ``ValueError`` with a precise reason on any schema violation.
-    Callers turn this into a quarantined ``CorruptStorageError``.
-    """
+def _construct(data: Any) -> Heartbeat:
+    """The ONE authoritative dict -> domain-``Heartbeat`` path (H4)."""
     if not isinstance(data, dict):
         raise ValueError(f"heartbeat root must be an object, got {type(data).__name__}")
     if not data:
         raise ValueError("heartbeat object is empty")
 
-    for field_name in _REQUIRED_STRING_FIELDS:
-        if field_name not in data:
-            raise ValueError(f"missing required field '{field_name}'")
-        if not isinstance(data[field_name], str) or not data[field_name].strip():
-            raise ValueError(f"'{field_name}' must be a non-empty string")
+    required = ("execution_id", "current_task", "state", "last_real_progress_at", "attempt_count")
+    missing = [name for name in required if name not in data]
+    if missing:
+        raise ValueError(f"missing required field(s): {missing}")
 
-    if "state" not in data:
-        raise ValueError("missing required field 'state'")
-    if not isinstance(data["state"], str) or data["state"] not in {s.value for s in ExecutionState}:
-        raise ValueError(f"'state' is not a valid ExecutionState: {data.get('state')!r}")
-
-    if "last_real_progress_at" not in data:
-        raise ValueError("missing required field 'last_real_progress_at'")
-    if isinstance(data["last_real_progress_at"], bool) or not isinstance(
-        data["last_real_progress_at"], (int, float)
-    ):
-        raise ValueError("'last_real_progress_at' must be a number")
-    if not math.isfinite(data["last_real_progress_at"]) or data["last_real_progress_at"] < 0:
-        raise ValueError("'last_real_progress_at' must be a finite non-negative number")
-
-    if "attempt_count" not in data:
-        raise ValueError("missing required field 'attempt_count'")
-    if isinstance(data["attempt_count"], bool) or not isinstance(data["attempt_count"], int):
-        raise ValueError("'attempt_count' must be an int")
-    if data["attempt_count"] < 0:
-        raise ValueError("'attempt_count' must be >= 0")
-
-    for field_name in _REQUIRED_NULLABLE_STRING_FIELDS:
-        value = data.get(field_name)
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"'{field_name}' must be a string or null")
+    try:
+        state = ExecutionState(data["state"])
+    except ValueError as exc:
+        raise ValueError(f"'state' is not a valid ExecutionState: {data.get('state')!r}") from exc
 
     pending_work = data.get("pending_work", [])
-    if not isinstance(pending_work, list) or not all(isinstance(p, str) for p in pending_work):
+    if not isinstance(pending_work, list):
         raise ValueError("'pending_work' must be a list of strings")
 
+    try:
+        return Heartbeat(
+            execution_id=data["execution_id"],
+            state=state,
+            current_task=data["current_task"],
+            current_subtask=data.get("current_subtask"),
+            last_real_progress_at=data["last_real_progress_at"],
+            last_progress_evidence=data.get("last_progress_evidence"),
+            attempt_count=data["attempt_count"],
+            current_strategy=data.get("current_strategy"),
+            last_error=data.get("last_error"),
+            pending_work=tuple(pending_work),
+        )
+    except (InvalidObservationError, TypeError) as exc:
+        # Domain-level construction failure (e.g. a whitespace-only
+        # string, or a wrong-typed field the structural checks above
+        # didn't already catch) is exactly as "corrupt" as a missing
+        # field — normalize it the same way.
+        raise ValueError(str(exc)) from exc
+
+
+def _validate_schema(data: Any) -> Any:
+    """``SafeJsonStore`` validator: construct the real domain object
+    purely to validate it, then return the ORIGINAL dict so the on-disk
+    representation stays plain JSON."""
+    _construct(data)
     return data
 
 
 def _from_dict(data: Any) -> Heartbeat:
-    data = _validate_schema(data)
-    return Heartbeat(
-        execution_id=data["execution_id"],
-        state=ExecutionState(data["state"]),
-        current_task=data["current_task"],
-        current_subtask=data.get("current_subtask"),
-        last_real_progress_at=data["last_real_progress_at"],
-        last_progress_evidence=data.get("last_progress_evidence"),
-        attempt_count=data["attempt_count"],
-        current_strategy=data.get("current_strategy"),
-        last_error=data.get("last_error"),
-        pending_work=tuple(data.get("pending_work", ())),
-    )
+    return _construct(data)
 
 
 class HeartbeatWriter:
