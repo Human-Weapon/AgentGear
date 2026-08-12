@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+cov.xml
+
+# Local runtime data (optional; create under .agentops/ instead)
+*.tmp
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key

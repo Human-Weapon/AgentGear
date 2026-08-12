@@ -1,0 +1,29 @@
+# Interop metadata for AgentGear
+# Part of the HERMES OSS `.agentops/` shared format.
+# Tools MUST ignore fields they don't understand.
+
+project:
+  name: AgentGear
+  slug: agentgear
+  ecosystem: HERMES OSS
+  # A tool is enabled when its package is importable. Do not hardcode.
+  optional_integrations:
+    promptgraph: auto
+    agentbench: auto
+    projectkaizen: auto
+    skillguard: auto
+
+capability:
+  # What this tool is allowed to do in the ecosystem.
+  reads:
+    - .agentops/context/**   # read-only, only when PromptGraphContextProvider is used
+  writes:
+    - .agentops/metrics/**   # optional watchdog heartbeats/checkpoints, if state_dir points here
+  network: false
+  package_install: false
+  git_write: false
+
+policies:
+  # execution orchestration only — AgentGear DOES NOT select context, validate
+  # skill safety, measure strategies, or improve project code.
+  responsibility: orchestration

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentgear"
+version = "0.1.0"
+description = "Adaptive compute orchestrator for AI software-engineering agents: model routing, reasoning routing, multi-agent planning, and an execution watchdog with bounded recovery."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "HERMES OSS", email = "oss@hermes.local" },
+]
+keywords = ["ai", "agents", "orchestration", "routing", "watchdog", "llm", "reliability"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+# No required runtime deps beyond stdlib.
+yaml = ["PyYAML>=6.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "build>=1.0",
+]
+
+[project.scripts]
+agentgear = "agentgear.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hermes-oss/agentgear"
+Issues = "https://github.com/hermes-oss/agentgear/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=agentgear --cov-report=term-missing"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.coverage.run]
+source = ["agentgear"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
