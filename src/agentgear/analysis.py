@@ -16,6 +16,7 @@ from .models import ComplexityAssessment, ComplexityLevel, RiskAssessment, RiskL
 # returns via n / (n + K) keeps a single huge outlier from dominating.
 _FILES_SATURATION_K = 12.0
 _MODULES_SATURATION_K = 5.0
+_CRITICAL_INDIVIDUAL_RISK_THRESHOLD = 0.85
 
 
 def _saturating(count: int, k: float) -> float:
@@ -105,8 +106,19 @@ def assess_risk(profile: TaskProfile) -> RiskAssessment:
 
     top = sorted(factors.items(), key=lambda kv: kv[1] * _RISK_WEIGHTS[kv[0]], reverse=True)
     top_desc = ", ".join(f"{name}={value:.2f}" for name, value in top[:3])
-    rationale = f"risk={score:.2f}; dominant factors: {top_desc}"
-
-    return RiskAssessment(
-        score=score, level=_risk_level(score), factors=factors, rationale=rationale
+    critical_signals = tuple(
+        name
+        for name in ("security_impact", "data_impact", "irreversibility")
+        if factors[name] >= _CRITICAL_INDIVIDUAL_RISK_THRESHOLD
     )
+    if critical_signals:
+        level = RiskLevel.CRITICAL
+        rationale = (
+            f"risk={score:.2f}; critical individual signal(s): {', '.join(critical_signals)}; "
+            f"dominant factors: {top_desc}"
+        )
+    else:
+        level = _risk_level(score)
+        rationale = f"risk={score:.2f}; dominant factors: {top_desc}"
+
+    return RiskAssessment(score=score, level=level, factors=factors, rationale=rationale)

@@ -31,10 +31,11 @@ import math
 from ..budget import ExecutionBudgetLedger, ReservationKind
 from ..config import Policy
 from ..escalation import EscalationDecision, EscalationSignals, decide_escalation
-from ..exceptions import InvalidObservationError, InvalidStateTransitionError
+from ..exceptions import BudgetExceededError, InvalidObservationError, InvalidStateTransitionError
 from ..models import (
     BlockedReport,
     Checkpoint,
+    ExecutionPlan,
     ExecutionState,
     ModelTier,
     ProgressEvent,
@@ -52,6 +53,12 @@ from .stall_detection import ActivityRecord, StallDetector
 from .state_machine import ExecutionStateMachine
 
 _ACTIVE_STATES = (ExecutionState.RUNNING, ExecutionState.TESTING, ExecutionState.REVIEWING)
+_RECOVERY_RESUME_STATES = (
+    ExecutionState.PLANNING,
+    ExecutionState.RUNNING,
+    ExecutionState.TESTING,
+    ExecutionState.REVIEWING,
+)
 
 
 def _validate_finite_non_negative(name: str, value: float) -> float:
@@ -113,6 +120,8 @@ class ExecutionWatchdog:
         self._current_task: str = ""
         self._last_progress_evidence: str | None = None
         self._last_error: str | None = None
+        self._planned_initial_tokens: int | None = None
+        self._planned_initial_cost: float | None = None
 
         self._heartbeat_writer = HeartbeatWriter(state_dir) if state_dir else None
         self._checkpoint_store = None
@@ -120,6 +129,35 @@ class ExecutionWatchdog:
             from ..checkpoints import CheckpointStore
 
             self._checkpoint_store = CheckpointStore(state_dir)
+
+    @classmethod
+    def from_plan(
+        cls,
+        execution_id: str,
+        execution_plan: ExecutionPlan,
+        policy: Policy,
+        *,
+        state_dir: str | None = None,
+    ) -> ExecutionWatchdog:
+        """Create runtime supervision for a concrete plan.
+
+        The plan's full initial multi-agent estimate is committed when
+        ``start()`` succeeds, so subsequent escalations and recoveries
+        cannot treat the already-planned execution as free budget.
+        """
+        watchdog = cls(
+            execution_id,
+            policy,
+            initial_tier=execution_plan.primary_model.tier,
+            initial_reasoning=execution_plan.primary_model.reasoning,
+            context_budget_tokens=execution_plan.context_budget_tokens,
+            state_dir=state_dir,
+        )
+        watchdog._planned_initial_tokens = (
+            execution_plan.context_budget_tokens * execution_plan.strategy.agent_count
+        )
+        watchdog._planned_initial_cost = execution_plan.max_estimated_cost
+        return watchdog
 
     # -- internal helpers ----------------------------------------------
 
@@ -192,9 +230,20 @@ class ExecutionWatchdog:
         initial_cost: float = 0.0,
     ) -> None:
         _require_non_blank("task", task)
+        if self._sm.state != ExecutionState.PLANNING or self._started_at is not None:
+            raise InvalidStateTransitionError(
+                "start() requires a new PLANNING execution, current state is "
+                f"{self._sm.state.value}"
+            )
+        if self._planned_initial_tokens is not None and (initial_tokens or initial_cost):
+            raise InvalidObservationError(
+                "start() cannot accept initial_tokens/initial_cost when the watchdog was "
+                "created with from_plan(); the plan's full estimate is charged automatically"
+            )
         at_seconds = self._validate_time(at_seconds)
-        self._started_at = at_seconds
-        self._current_task = task
+        if self._planned_initial_tokens is not None:
+            initial_tokens = self._planned_initial_tokens
+            initial_cost = self._planned_initial_cost or 0.0
         if initial_tokens or initial_cost:
             reservation = self.budget.reserve(
                 kind=ReservationKind.INITIAL_PLAN,
@@ -203,6 +252,8 @@ class ExecutionWatchdog:
                 label="initial_plan",
             )
             self.budget.commit(reservation.reservation_id)
+        self._started_at = at_seconds
+        self._current_task = task
         self._sm.transition(ExecutionState.RUNNING, at_seconds=at_seconds, note=f"started: {task}")
         self._write_heartbeat(at_seconds)
 
@@ -212,6 +263,16 @@ class ExecutionWatchdog:
         TESTING -> REVIEWING -> RUNNING). Still funnels through the same
         validated state machine as every other coordinator method.
         """
+        if target in {
+            ExecutionState.STALLED,
+            ExecutionState.RECOVERING,
+            ExecutionState.BLOCKED,
+            ExecutionState.COMPLETED,
+        }:
+            raise InvalidStateTransitionError(
+                f"advance() cannot target {target.value}; use the dedicated lifecycle method "
+                "so watchdog/reporting invariants are enforced"
+            )
         at_seconds = self._validate_time(at_seconds)
         self._sm.transition(target, at_seconds=at_seconds, note=note)
         self._write_heartbeat(at_seconds)
@@ -336,6 +397,23 @@ class ExecutionWatchdog:
             )
             return None
 
+        try:
+            reservation = self.budget.reserve(
+                kind=ReservationKind.RECOVERY,
+                tokens=self.context_budget_tokens,
+                cost=estimate_cost(self.tier, self.context_budget_tokens),
+                label=strategy,
+            )
+        except BudgetExceededError as exc:
+            self._sm.transition(ExecutionState.RECOVERING, at_seconds=at_seconds, note=reason)
+            self._transition_to_blocked(
+                at_seconds=at_seconds,
+                blocker="recovery budget exhausted",
+                root_cause=str(exc),
+            )
+            return None
+        self.budget.commit(reservation.reservation_id)
+
         self._tried_strategies = (*self._tried_strategies, strategy)
         attempt = RecoveryAttempt(
             reason=reason,
@@ -372,6 +450,19 @@ class ExecutionWatchdog:
             )
         if not self._recovery_attempts:
             raise InvalidObservationError("no recovery attempt is in progress")
+        if not isinstance(result, RecoveryResult):
+            raise InvalidObservationError(
+                f"result must be a RecoveryResult, got {type(result).__name__}"
+            )
+        if not isinstance(resume_state, ExecutionState):
+            raise InvalidObservationError(
+                f"resume_state must be an ExecutionState, got {type(resume_state).__name__}"
+            )
+        if result == RecoveryResult.SUCCESS and resume_state not in _RECOVERY_RESUME_STATES:
+            raise InvalidStateTransitionError(
+                "successful recovery can resume only to planning, running, testing, or reviewing; "
+                f"got {resume_state.value}"
+            )
 
         last = self._recovery_attempts[-1]
         self._recovery_attempts[-1] = RecoveryAttempt(
@@ -383,11 +474,25 @@ class ExecutionWatchdog:
         )
 
         if result == RecoveryResult.SUCCESS:
+            progress_description = evidence or f"recovered via {last.strategy}"
             self._sm.transition(
                 resume_state,
                 at_seconds=at_seconds,
-                note=evidence or f"recovered via {last.strategy}",
+                note=progress_description,
             )
+            # A successful recovery is genuine new evidence. Record it as
+            # such so every detector signal uses this point as its fresh
+            # post-progress boundary rather than immediately re-counting
+            # the activity that caused the original stall.
+            self._progress.record(
+                ProgressEvent(
+                    kind=ProgressSignalKind.ERROR_RESOLVED,
+                    description=progress_description,
+                    at_seconds=at_seconds,
+                    evidence={"recovery_strategy": last.strategy},
+                )
+            )
+            self._last_progress_evidence = progress_description
             self._loop_guard.record_progress()
             self._write_heartbeat(at_seconds)
             return
@@ -487,6 +592,7 @@ class ExecutionWatchdog:
             "escalations_used": self.escalations_used,
             "current_task": self._current_task,
             "attempt_count": len(self._activities),
+            "started_at": self._started_at,
             "last_progress_at": self._progress.last_progress_at,
             "recovery_attempts": len(self._recovery_attempts),
             "budget": self.budget.status(),

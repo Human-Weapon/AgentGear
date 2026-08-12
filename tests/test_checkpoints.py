@@ -5,7 +5,7 @@ import json
 import pytest
 
 from agentgear.checkpoints import CheckpointStore
-from agentgear.exceptions import CorruptStorageError
+from agentgear.exceptions import CorruptStorageError, InvalidObservationError
 from agentgear.models import Checkpoint
 
 
@@ -95,3 +95,22 @@ def test_quarantined_checkpoint_file_does_not_block_a_fresh_append(tmp_path) -> 
         store.all("exec-1")
     store.append(Checkpoint(execution_id="exec-1", phase="fresh", at_seconds=0.0))
     assert store.latest("exec-1").phase == "fresh"
+
+
+def test_append_never_silently_overwrites_schema_invalid_history(tmp_path) -> None:
+    """A successful append must not discard corrupt acknowledged state."""
+    _write_raw(tmp_path, "exec-1", {})
+    store = CheckpointStore(tmp_path)
+
+    with pytest.raises(CorruptStorageError):
+        store.append(Checkpoint(execution_id="exec-1", phase="fresh", at_seconds=0.0))
+
+    assert not (tmp_path / "exec-1.checkpoints.json").exists()
+
+
+@pytest.mark.parametrize("kwargs", [{"execution_id": ""}, {"phase": "  "}, {"at_seconds": -1.0}])
+def test_checkpoint_rejects_invalid_domain_data(kwargs: dict) -> None:
+    base = {"execution_id": "exec-1", "phase": "build", "at_seconds": 0.0}
+    base.update(kwargs)
+    with pytest.raises(InvalidObservationError):
+        Checkpoint(**base)

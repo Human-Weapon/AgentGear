@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from agentgear.analysis import assess_complexity, assess_risk
 from agentgear.models import ComplexityLevel, RiskLevel, TaskProfile
 
@@ -61,3 +63,18 @@ def test_rationale_mentions_score() -> None:
     tp = TaskProfile(description="x")
     c = assess_complexity(tp)
     assert f"{c.score:.2f}" in c.rationale
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        TaskProfile(description="auth", security_impact=1.0),
+        TaskProfile(description="data", data_impact=1.0),
+        TaskProfile(description="irreversible", reversibility=0.0),
+    ],
+)
+def test_maximum_individual_risk_signal_is_never_labeled_low(profile: TaskProfile) -> None:
+    """The public analysis API must not contradict the safety routing floor."""
+    assessment = assess_risk(profile)
+    assert assessment.level == RiskLevel.CRITICAL
+    assert "critical individual signal" in assessment.rationale

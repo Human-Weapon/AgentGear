@@ -17,6 +17,7 @@ and changes nothing.
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -63,7 +64,7 @@ def _require_positive_int(name: str, value: int) -> int:
 def _require_positive_float(name: str, value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(f"{name} must be a number, got {type(value).__name__}")
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ConfigurationError(f"{name} must be > 0, got {value}")
     return float(value)
 
@@ -79,7 +80,7 @@ def _require_non_negative_int(name: str, value: int) -> int:
 def _require_non_negative_float(name: str, value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(f"{name} must be a number, got {type(value).__name__}")
-    if value < 0:
+    if not math.isfinite(value) or value < 0:
         raise ConfigurationError(f"{name} must be >= 0, got {value}")
     return float(value)
 
@@ -182,12 +183,22 @@ class ExecutionBudgetLedger:
         """Mark a reservation as actually spent (no change to totals —
         committed reservations already counted against the ceiling)."""
         reservation = self._require_reservation(reservation_id)
+        if reservation.state != ReservationState.RESERVED:
+            raise BudgetExceededError(
+                f"cannot commit reservation {reservation_id!r} in state {reservation.state.value}"
+            )
         self._reservations[reservation_id] = _replace_state(reservation, ReservationState.COMMITTED)
 
     def release(self, reservation_id: str) -> None:
         """Free a reservation that was never spent, returning its
         tokens/cost to the available pool."""
         reservation = self._require_reservation(reservation_id)
+        if reservation.state != ReservationState.RESERVED:
+            raise BudgetExceededError(
+                f"cannot release reservation {reservation_id!r} in state "
+                f"{reservation.state.value}; "
+                "only unspent reservations can be released"
+            )
         self._reservations[reservation_id] = _replace_state(reservation, ReservationState.RELEASED)
 
     def _require_reservation(self, reservation_id: str) -> BudgetReservation:

@@ -14,6 +14,7 @@ raw ``KeyError``/``TypeError`` out of ``all()``/``latest()``.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -56,8 +57,16 @@ def _validate_entry_schema(entry: Any, index: int) -> dict:
     at_seconds = entry.get("at_seconds", 0.0)
     if isinstance(at_seconds, bool) or not isinstance(at_seconds, (int, float)):
         raise ValueError(f"checkpoint[{index}].at_seconds must be a number")
+    if not math.isfinite(at_seconds) or at_seconds < 0:
+        raise ValueError(f"checkpoint[{index}].at_seconds must be a finite non-negative number")
 
     return entry
+
+
+def _validate_history_schema(data: Any) -> list[dict]:
+    if not isinstance(data, list):
+        raise ValueError(f"checkpoint history must be a list, got {type(data).__name__}")
+    return [_validate_entry_schema(entry, i) for i, entry in enumerate(data)]
 
 
 def _from_dict(data: Any, index: int) -> Checkpoint:
@@ -85,15 +94,17 @@ class CheckpointStore:
         # `_MISSING` (not the empty list `[]`) marks "file does not exist",
         # so a checkpoint file corrupted into literal JSON `null` is never
         # silently mistaken for a legitimate, merely-empty history.
-        return SafeJsonStore(path, trusted_root=self.state_dir, default=lambda: _MISSING)
+        return SafeJsonStore(
+            path,
+            trusted_root=self.state_dir,
+            default=lambda: _MISSING,
+            validator=_validate_history_schema,
+        )
 
     def append(self, checkpoint: Checkpoint) -> None:
         store = self._store(checkpoint.execution_id)
         store.update(
-            lambda current: [
-                *(current if isinstance(current, list) else []),
-                _to_dict(checkpoint),
-            ]
+            lambda current: [*([] if current is _MISSING else current), _to_dict(checkpoint)]
         )
 
     def all(self, execution_id: str) -> list[Checkpoint]:
@@ -101,10 +112,6 @@ class CheckpointStore:
         data = store.read()
         if data is _MISSING:
             return []
-        if not isinstance(data, list):
-            store.quarantine_invalid(
-                f"checkpoint history for {execution_id!r} must be a list, got {type(data).__name__}"
-            )
         try:
             return [_from_dict(entry, i) for i, entry in enumerate(data)]
         except (ValueError, KeyError, TypeError) as exc:

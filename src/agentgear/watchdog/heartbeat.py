@@ -15,6 +15,7 @@ quarantined and reported as ``CorruptStorageError`` — never as a raw
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,8 @@ def _validate_schema(data: Any) -> dict:
         data["last_real_progress_at"], (int, float)
     ):
         raise ValueError("'last_real_progress_at' must be a number")
+    if not math.isfinite(data["last_real_progress_at"]) or data["last_real_progress_at"] < 0:
+        raise ValueError("'last_real_progress_at' must be a finite non-negative number")
 
     if "attempt_count" not in data:
         raise ValueError("missing required field 'attempt_count'")
@@ -151,7 +154,12 @@ class HeartbeatWriter:
         # `None` is itself valid JSON (`null`), so reusing it as the
         # missing-file default would make a corrupt file containing a
         # literal `null` indistinguishable from "no heartbeat written yet".
-        return SafeJsonStore(path, trusted_root=self.state_dir, default=lambda: _MISSING)
+        return SafeJsonStore(
+            path,
+            trusted_root=self.state_dir,
+            default=lambda: _MISSING,
+            validator=_validate_schema,
+        )
 
     def write(self, heartbeat: Heartbeat) -> None:
         store = self._store(heartbeat.execution_id)

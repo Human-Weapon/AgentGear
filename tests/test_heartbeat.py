@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from agentgear.exceptions import CorruptStorageError
-from agentgear.models import ExecutionState
+from agentgear.exceptions import CorruptStorageError, InvalidObservationError
+from agentgear.models import ExecutionState, Heartbeat
 from agentgear.watchdog.heartbeat import HeartbeatWriter, build_heartbeat
 
 
@@ -155,3 +155,29 @@ def test_quarantined_heartbeat_does_not_block_a_fresh_write(tmp_path) -> None:
         writer.read("exec-1")
     writer.write(_hb("exec-1"))
     assert writer.read("exec-1") == _hb("exec-1")
+
+
+def test_write_never_silently_overwrites_schema_invalid_heartbeat(tmp_path) -> None:
+    """A caller must learn that the prior state was corrupt before replacing it."""
+    _write_raw(tmp_path, "exec-1", {})
+    writer = HeartbeatWriter(tmp_path)
+
+    with pytest.raises(CorruptStorageError):
+        writer.write(_hb("exec-1"))
+
+    assert not (tmp_path / "exec-1.heartbeat.json").exists()
+
+
+def test_heartbeat_rejects_invalid_domain_data_before_it_reaches_storage() -> None:
+    with pytest.raises(InvalidObservationError):
+        Heartbeat(
+            execution_id="exec-1",
+            state=ExecutionState.RUNNING,
+            current_task="x",
+            current_subtask=None,
+            last_real_progress_at=float("nan"),
+            last_progress_evidence=None,
+            attempt_count=0,
+            current_strategy=None,
+            last_error=None,
+        )

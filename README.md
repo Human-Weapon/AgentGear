@@ -110,6 +110,11 @@ assert result.review_required is True
 
 A blended score alone can dilute one maxed-out signal into a merely "moderate" average; `critical_risk` exists specifically so that never happens.
 
+For the same reason, the public `assess_risk()` result labels a maximum
+individual security, data, or irreversibility signal `CRITICAL` and names it
+in the rationale. Its numeric `score` remains the documented weighted
+heuristic; do not interpret that score alone as the complete risk decision.
+
 ## Reasoning levels
 
 Reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`, `max`) is a **separate dimension** from model tier, using its own score blend (weighted toward risk) and its own threshold set (`Policy.reasoning_thresholds`). `tier=X, reasoning=high` is never assumed equivalent to `tier=Y, reasoning=low` for a different tier — the two dimensions are computed and configured independently.
@@ -170,6 +175,14 @@ watchdog.complete(at_seconds=10.0, evidence=("all tests pass",))
 
 print(watchdog.status())
 ```
+
+When supervision begins from an `ExecutionPlan`, construct it with
+`ExecutionWatchdog.from_plan(...)` instead. That binds the coordinator to the
+plan's chosen tier, reasoning, context budget, and complete initial
+multi-agent token/cost estimate; `start()` then commits that estimate before
+the execution becomes `RUNNING`. A directly constructed watchdog is for an
+external runtime that has no plan object and must provide any known initial
+charge explicitly through `start(initial_tokens=..., initial_cost=...)`.
 
 What the coordinator composes and enforces on your behalf:
 

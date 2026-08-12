@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..exceptions import InvalidObservationError
 from ..models import ProgressEvent
 
 
@@ -27,6 +28,11 @@ class ProgressTracker:
     events: list[ProgressEvent] = field(default_factory=list)
 
     def record(self, event: ProgressEvent) -> None:
+        if self.events and event.at_seconds < self.last_progress_at:
+            raise InvalidObservationError(
+                f"progress at_seconds={event.at_seconds} is before the last real progress "
+                f"at_seconds={self.last_progress_at}; progress events must be chronological"
+            )
         self.events.append(event)
 
     @property

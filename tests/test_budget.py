@@ -68,6 +68,21 @@ def test_release_frees_budget() -> None:
     assert ledger.remaining_cost == 1.0
 
 
+def test_committed_reservation_cannot_be_released_to_bypass_hard_budget() -> None:
+    """Spent budget must remain charged for the execution lifetime."""
+    ledger = ExecutionBudgetLedger(max_tokens=100, max_cost=1.0)
+    initial = ledger.reserve(kind=ReservationKind.INITIAL_PLAN, tokens=100, cost=1.0)
+    ledger.commit(initial.reservation_id)
+
+    with pytest.raises(BudgetExceededError):
+        ledger.release(initial.reservation_id)
+    with pytest.raises(BudgetExceededError):
+        ledger.reserve(kind=ReservationKind.ESCALATION, tokens=1, cost=0.01)
+
+    assert ledger.committed_tokens == 100
+    assert ledger.committed_cost == 1.0
+
+
 def test_committing_unknown_reservation_raises() -> None:
     ledger = ExecutionBudgetLedger(max_tokens=100, max_cost=1.0)
     with pytest.raises(BudgetExceededError):

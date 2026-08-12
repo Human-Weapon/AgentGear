@@ -30,6 +30,10 @@ from the first independent adversarial audit (baseline commit `5330554`).
   jointly blow the budget. A new `ExecutionBudgetLedger` (`budget.py`) tracks cumulative
   reserved/committed tokens and cost across the initial plan and every escalation/recovery
   attempt in one shared pool; `decide_escalation` consults it when supplied.
+  `ExecutionWatchdog.from_plan(...)` now commits the entire initial multi-agent plan at
+  `start()`, and every accepted recovery attempt reserves/commits a conservative
+  context-sized charge before it begins. A committed reservation can no longer be
+  released, so spent budget cannot be reused to bypass a hard ceiling.
 - **AG-06** — Escalation and progress signals (`repeated_failures`, `uncertainty`,
   `elapsed_seconds`, boolean flags, timestamps, fingerprints, descriptions) were not
   validated, so out-of-range, negative, or NaN/Infinity values were silently accepted and
@@ -81,6 +85,9 @@ from the first independent adversarial audit (baseline commit `5330554`).
   and RUNTIME SUPERVISION (`ExecutionWatchdog`).
 - `ExecutionBudgetLedger` / `ReservationKind` / `ReservationState` (`budget.py`), exported
   from the top-level package.
+- `ExecutionWatchdog.from_plan(...)`, the budget-safe bridge from the planning API to
+  runtime supervision. It binds the full initial plan estimate to the coordinator's
+  execution-wide ledger.
 - `Policy.critical_risk` (`CriticalRiskPolicy`): configurable per-signal critical-risk
   floors independent of the blended risk score.
 - Real Windows-junction filesystem containment tests (direct, nested, and
@@ -95,12 +102,22 @@ from the first independent adversarial audit (baseline commit `5330554`).
   the search indexer briefly opening the just-written file. The replace step now retries
   a bounded number of times with a short backoff before giving up; this never masks a
   real containment/logic error, which still raise immediately.
+- A schema-invalid but syntactically valid heartbeat/checkpoint file could be silently
+  overwritten by a later write/append. `SafeJsonStore` now accepts an optional document
+  validator, and both persistence users validate under the same lock before mutating;
+  corrupt state is quarantined and reported instead of discarded.
 
 ### Changed
 
 - Deprecated the standalone blended-risk-only override language in favor of documenting
   both the blended-score override (risk ≥ 0.85 → minimum `ADVANCED`) and the new
   independent per-signal `critical_risk` floors side by side.
+
+### Additional hardening in this branch
+
+- Public risk analysis now reports `CRITICAL` whenever security impact, data impact,
+  or irreversibility reaches the conservative individual-signal threshold. This prevents
+  a diluted weighted score from presenting a maximum raw risk as `low`.
 
 ### Known limitations
 

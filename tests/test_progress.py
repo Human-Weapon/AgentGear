@@ -61,3 +61,14 @@ def test_progress_event_rejects_invalid_timestamp(at_seconds: float) -> None:
 def test_progress_event_rejects_non_kind_enum() -> None:
     with pytest.raises(InvalidObservationError):
         ProgressEvent(kind="file_changed", description="x", at_seconds=1.0)  # type: ignore[arg-type]
+
+
+def test_tracker_rejects_event_before_existing_progress_boundary() -> None:
+    tracker = ProgressTracker()
+    tracker.record(
+        ProgressEvent(kind=ProgressSignalKind.FILE_CHANGED, description="changed", at_seconds=10.0)
+    )
+    with pytest.raises(InvalidObservationError):
+        tracker.record(
+            ProgressEvent(kind=ProgressSignalKind.NEW_EVIDENCE, description="older", at_seconds=9.0)
+        )

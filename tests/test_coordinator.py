@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from agentgear.analysis import assess_complexity, assess_risk
 from agentgear.config import BudgetPolicy, Policy, WatchdogPolicy
 from agentgear.escalation import EscalationSignals
 from agentgear.exceptions import (
@@ -21,7 +22,9 @@ from agentgear.models import (
     ProgressSignalKind,
     ReasoningEffort,
     RecoveryResult,
+    TaskProfile,
 )
+from agentgear.planning import build_execution_plan
 from agentgear.watchdog import ExecutionWatchdog
 
 
@@ -101,6 +104,20 @@ def test_progress_resets_the_stall_clock() -> None:
     assert w.state == ExecutionState.RUNNING
 
 
+def test_successful_recovery_establishes_a_fresh_progress_boundary() -> None:
+    w = ExecutionWatchdog("e1", _policy())
+    w.start(task="x", at_seconds=0.0)
+    w.record_activity(at_seconds=6.0, fingerprint="first", succeeded=True)
+    w.record_activity(at_seconds=7.0, fingerprint="second", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+
+    w.record_recovery_result(at_seconds=8.0, result=RecoveryResult.SUCCESS, evidence="fixed")
+    w.record_activity(at_seconds=9.0, fingerprint="after-recovery", succeeded=True)
+
+    assert w.state == ExecutionState.RUNNING
+    assert w.status()["last_progress_at"] == 8.0
+
+
 def test_recovery_success_returns_to_resume_state() -> None:
     w = ExecutionWatchdog("e1", _policy())
     w.start(task="x", at_seconds=0.0)
@@ -167,6 +184,49 @@ def test_blocked_is_never_reached_without_a_report() -> None:
     assert w.blocked_report is not None
 
 
+def test_advance_cannot_bypass_the_blocked_report_invariant() -> None:
+    w = ExecutionWatchdog("e1", _policy())
+    w.start(task="x", at_seconds=0.0)
+    w.record_activity(at_seconds=6.0, fingerprint="first", succeeded=True)
+    w.record_activity(at_seconds=7.0, fingerprint="second", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+
+    with pytest.raises(InvalidStateTransitionError):
+        w.advance(ExecutionState.BLOCKED, at_seconds=8.0)
+    assert w.state == ExecutionState.RECOVERING
+    assert w.blocked_report is None
+
+
+def test_successful_recovery_cannot_bypass_the_blocked_report_invariant() -> None:
+    w = ExecutionWatchdog("e1", _policy())
+    w.start(task="x", at_seconds=0.0)
+    w.record_activity(at_seconds=6.0, fingerprint="first", succeeded=True)
+    w.record_activity(at_seconds=7.0, fingerprint="second", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+
+    with pytest.raises(InvalidStateTransitionError):
+        w.record_recovery_result(
+            at_seconds=8.0,
+            result=RecoveryResult.SUCCESS,
+            resume_state=ExecutionState.BLOCKED,
+            evidence="claimed recovery",
+        )
+    assert w.state == ExecutionState.RECOVERING
+    assert w.blocked_report is None
+
+
+def test_failed_second_start_does_not_charge_budget_or_rewrite_start_boundary() -> None:
+    w = ExecutionWatchdog("e1", _policy())
+    w.start(task="first", at_seconds=0.0, initial_tokens=100, initial_cost=0.1)
+
+    with pytest.raises(InvalidStateTransitionError):
+        w.start(task="second", at_seconds=1.0, initial_tokens=100, initial_cost=0.1)
+
+    assert w.status()["started_at"] == 0.0
+    assert w.budget.committed_tokens == 100
+    assert w.budget.committed_cost == pytest.approx(0.1)
+
+
 def test_begin_recovery_requires_stalled_state() -> None:
     w = ExecutionWatchdog("e1", _policy())
     w.start(task="x", at_seconds=0.0)
@@ -216,6 +276,46 @@ def test_ag04_coordinator_denies_second_escalation_once_cumulative_budget_exceed
     # Denial must not have advanced tier/reasoning/escalations_used.
     assert w.tier == decision_1.next_tier
     assert w.escalations_used == 1
+
+
+def test_from_plan_commits_the_full_initial_plan_charge_to_the_shared_ledger() -> None:
+    p = _policy()
+    profile = TaskProfile(description="rename", expected_output_tokens=10)
+    execution_plan = build_execution_plan(
+        profile, assess_complexity(profile), assess_risk(profile), p
+    )
+    w = ExecutionWatchdog.from_plan("e1", execution_plan, p)
+
+    w.start(task=profile.description, at_seconds=0.0)
+
+    assert w.budget.committed_tokens == (
+        execution_plan.context_budget_tokens * execution_plan.strategy.agent_count
+    )
+    assert w.budget.committed_cost == pytest.approx(execution_plan.max_estimated_cost)
+
+
+def test_recovery_attempts_share_and_enforce_the_execution_budget() -> None:
+    p = Policy(
+        budget=BudgetPolicy(max_estimated_cost=0.0015, max_estimated_tokens=10_000),
+        watchdog=WatchdogPolicy(
+            no_progress_seconds=1.0,
+            no_progress_cycles=2,
+            max_recovery_attempts=5,
+            max_total_attempts=100,
+        ),
+    )
+    w = ExecutionWatchdog("e1", p, context_budget_tokens=1000)
+    w.start(task="x", at_seconds=0.0)
+    w.record_activity(at_seconds=2.0, fingerprint="a", succeeded=True)
+    w.record_activity(at_seconds=3.0, fingerprint="b", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+    assert w.budget.committed_cost == pytest.approx(0.001)
+
+    w.record_recovery_result(at_seconds=4.0, result=RecoveryResult.FAILURE)
+    assert w.state == ExecutionState.STALLED
+    assert w.begin_recovery(at_seconds=5.0) is None
+    assert w.state == ExecutionState.BLOCKED
+    assert w.budget.committed_cost == pytest.approx(0.001)
 
 
 # --- validation (AG-06 at the coordinator boundary) -------------------------

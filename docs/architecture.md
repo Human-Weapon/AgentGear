@@ -127,6 +127,14 @@ individually affordable can still be correctly denied on the second one — the 
 knows what the first one already committed; a stateless per-call check against the static
 policy ceiling cannot.
 
+`ExecutionWatchdog.from_plan(execution_id, execution_plan, policy)` is the runtime entry
+point when planning has already produced an `ExecutionPlan`: its `start()` transaction
+commits the plan's full multi-agent token/cost estimate before entering `RUNNING`.
+Recovery attempts likewise reserve and commit a conservative context-sized charge before
+they are started; when no such charge fits, the coordinator emits `BLOCKED` rather than
+running an unbudgeted recovery. A directly constructed coordinator intentionally has no
+implicit plan charge; its caller must provide a known initial charge to `start()`.
+
 ## Hard budgets
 
 `planning.build_execution_plan` raises `BudgetExceededError` — never returns a plan that

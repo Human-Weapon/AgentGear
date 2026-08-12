@@ -332,6 +332,25 @@ class Checkpoint:
     last_good_state: str | None = None
     at_seconds: float = 0.0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "execution_id", _validate_non_blank_str("execution_id", self.execution_id)
+        )
+        object.__setattr__(self, "phase", _validate_non_blank_str("phase", self.phase))
+        object.__setattr__(
+            self, "at_seconds", _validate_observation_timestamp("at_seconds", self.at_seconds)
+        )
+        for name in ("completed", "pending"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or not all(isinstance(value, str) for value in values):
+                raise InvalidObservationError(f"{name} must be a tuple of strings")
+        if self.last_good_state is not None:
+            object.__setattr__(
+                self,
+                "last_good_state",
+                _validate_non_blank_str("last_good_state", self.last_good_state),
+            )
+
 
 @dataclass(frozen=True)
 class RecoveryAttempt:
@@ -368,3 +387,37 @@ class Heartbeat:
     current_strategy: str | None
     last_error: str | None
     pending_work: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "execution_id", _validate_non_blank_str("execution_id", self.execution_id)
+        )
+        if not isinstance(self.state, ExecutionState):
+            raise InvalidObservationError(
+                f"state must be an ExecutionState, got {type(self.state).__name__}"
+            )
+        object.__setattr__(
+            self, "current_task", _validate_non_blank_str("current_task", self.current_task)
+        )
+        object.__setattr__(
+            self,
+            "last_real_progress_at",
+            _validate_observation_timestamp("last_real_progress_at", self.last_real_progress_at),
+        )
+        if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int):
+            raise InvalidObservationError("attempt_count must be an int")
+        if self.attempt_count < 0:
+            raise InvalidObservationError("attempt_count must be >= 0")
+        for name in (
+            "current_subtask",
+            "last_progress_evidence",
+            "current_strategy",
+            "last_error",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _validate_non_blank_str(name, value))
+        if not isinstance(self.pending_work, tuple) or not all(
+            isinstance(value, str) for value in self.pending_work
+        ):
+            raise InvalidObservationError("pending_work must be a tuple of strings")
