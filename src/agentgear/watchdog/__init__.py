@@ -9,6 +9,7 @@ NEVER STOP SILENTLY. An execution is always in one explicit
 from __future__ import annotations
 
 from .blocked import build_blocked_report
+from .coordinator import ExecutionWatchdog
 from .heartbeat import HeartbeatWriter, build_heartbeat
 from .progress import ProgressTracker
 from .recovery import LoopGuard, RecoveryEngine
@@ -18,6 +19,7 @@ from .state_machine import ExecutionStateMachine
 __all__ = [
     "ActivityRecord",
     "ExecutionStateMachine",
+    "ExecutionWatchdog",
     "HeartbeatWriter",
     "LoopGuard",
     "ProgressTracker",

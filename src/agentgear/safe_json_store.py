@@ -24,6 +24,33 @@ from .path_security import assert_path_family_contained
 
 _LOCK_TIMEOUT_S = 10.0
 _LOCK_POLL_S = 0.05
+_REPLACE_RETRY_ATTEMPTS = 20
+_REPLACE_RETRY_DELAY_S = 0.02
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """Atomically replace ``dst`` with ``src``, retrying transient
+    ``PermissionError`` (Windows ``ERROR_ACCESS_DENIED`` / ``WinError 5``).
+
+    Even while the caller holds the store's own file lock, Windows can
+    still momentarily deny a rename/replace on a just-written file —
+    typically because antivirus real-time scanning or the search indexer
+    briefly opened it. This is purely transient OS-level contention on a
+    file we already own exclusively; a short bounded retry resolves it
+    without masking any real containment or logic error (those raise
+    ``PathEscapeError``/other exceptions well before this point).
+    """
+    last_exc: PermissionError | None = None
+    for attempt in range(_REPLACE_RETRY_ATTEMPTS):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            if attempt < _REPLACE_RETRY_ATTEMPTS - 1:
+                time.sleep(_REPLACE_RETRY_DELAY_S)
+    assert last_exc is not None
+    raise last_exc
 
 
 class FileLock:
@@ -212,7 +239,7 @@ class SafeJsonStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             self._check_write_paths(Path(tmp_name))
-            Path(tmp_name).replace(self.path)
+            _replace_with_retry(Path(tmp_name), self.path)
         except Exception:
             try:
                 os.unlink(tmp_name)

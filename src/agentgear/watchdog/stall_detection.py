@@ -3,8 +3,8 @@ heuristic (especially elapsed time) can trigger a false STALLED, and so a
 genuinely stuck agent cannot hide behind a single narrow check.
 
 Signals combined (principle #16):
-  * elapsed time since last real progress
-  * number of activity attempts since last real progress
+  * elapsed time since the progress boundary (see below)
+  * number of activity attempts since the progress boundary
   * repeated identical failures (same command/error fingerprint)
   * circular attempts (same fingerprint recurring without new evidence)
   * a trivial command taking abnormally long, repeatedly
@@ -12,6 +12,18 @@ Signals combined (principle #16):
 Time alone never triggers STALLED: the time-based trigger additionally
 requires a minimum number of attempted (and evidence-free) activities in
 that same window.
+
+**Progress boundary.** Every signal above is evaluated only against
+activity *after* the progress boundary — never the full history. The
+boundary is ``last_progress_at`` when the execution has ever made real
+progress, or ``started_at`` (the execution/observation start) when it has
+not. Without this, two bugs are possible: (1) an execution that has
+*never* made progress can never be flagged stalled, because there is no
+``last_progress_at`` to measure elapsed time from; (2) once genuine
+progress resets the clock, stale pre-progress activity (old failures, old
+repeated fingerprints) could still count toward a stall verdict computed
+after that progress happened. ``started_at`` closes gap (1); scoping every
+signal to activity strictly after the boundary closes gap (2).
 """
 
 from __future__ import annotations
@@ -21,6 +33,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from ..config import WatchdogPolicy
+from ..models import _validate_non_blank_str, _validate_observation_timestamp
 
 
 @dataclass(frozen=True)
@@ -39,6 +52,19 @@ class ActivityRecord:
     duration_seconds: float = 0.0
     error: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "at_seconds", _validate_observation_timestamp("at_seconds", self.at_seconds)
+        )
+        object.__setattr__(
+            self, "fingerprint", _validate_non_blank_str("fingerprint", self.fingerprint)
+        )
+        object.__setattr__(
+            self,
+            "duration_seconds",
+            _validate_observation_timestamp("duration_seconds", self.duration_seconds),
+        )
+
 
 @dataclass(frozen=True)
 class StallVerdict:
@@ -54,37 +80,42 @@ class StallDetector:
         self,
         *,
         now: float,
+        started_at: float,
         last_progress_at: float | None,
         recent_activities: Sequence[ActivityRecord],
     ) -> StallVerdict:
+        """Evaluate whether the execution should be considered stalled.
+
+        ``started_at`` is the execution/observation start boundary — it is
+        always required, even once real progress has happened, so the
+        progress boundary is never allowed to collapse to "no boundary at
+        all" (see module docstring).
+        """
         if not self.policy.enabled:
             return StallVerdict(is_stalled=False, reasons=())
 
         reasons: list[str] = []
         p = self.policy
 
-        since_progress = [
-            a
-            for a in recent_activities
-            if last_progress_at is None or a.at_seconds > last_progress_at
-        ]
+        boundary = last_progress_at if last_progress_at is not None else started_at
+        since_boundary = [a for a in recent_activities if a.at_seconds >= boundary]
 
-        elapsed = None if last_progress_at is None else max(0.0, now - last_progress_at)
-        time_exceeded = elapsed is not None and elapsed >= p.no_progress_seconds
-        attempts_exceeded = len(since_progress) >= p.no_progress_cycles
+        elapsed = max(0.0, now - boundary)
+        time_exceeded = elapsed >= p.no_progress_seconds
+        attempts_exceeded = len(since_boundary) >= p.no_progress_cycles
         if time_exceeded and attempts_exceeded:
             reasons.append(
-                f"no progress for {elapsed:.1f}s across {len(since_progress)} attempts "
+                f"no progress for {elapsed:.1f}s across {len(since_boundary)} attempts "
                 f"(>= {p.no_progress_seconds:.0f}s and >= {p.no_progress_cycles} attempts)"
             )
 
         trailing_failures = 0
-        for a in reversed(recent_activities):
+        for a in reversed(since_boundary):
             if a.succeeded:
                 break
             trailing_failures += 1
         if trailing_failures >= p.max_identical_failures:
-            trailing = recent_activities[-trailing_failures:]
+            trailing = since_boundary[-trailing_failures:]
             fingerprints = {a.fingerprint for a in trailing}
             if len(fingerprints) == 1:
                 reasons.append(
@@ -92,7 +123,7 @@ class StallDetector:
                     f"(fingerprint={next(iter(fingerprints))!r})"
                 )
 
-        fingerprint_counts = Counter(a.fingerprint for a in recent_activities)
+        fingerprint_counts = Counter(a.fingerprint for a in since_boundary)
         for fingerprint, count in fingerprint_counts.items():
             if count >= max(3, p.max_identical_failures + 1):
                 reasons.append(
@@ -103,7 +134,7 @@ class StallDetector:
 
         trivial_slow = [
             a
-            for a in recent_activities
+            for a in since_boundary
             if a.is_trivial and a.duration_seconds >= p.trivial_command_timeout_seconds
         ]
         if len(trivial_slow) >= 2:

@@ -4,6 +4,7 @@ import pytest
 
 from agentgear.config import (
     BudgetPolicy,
+    CriticalRiskPolicy,
     ModelTierMapping,
     Policy,
     ReasoningThresholds,
@@ -12,6 +13,7 @@ from agentgear.config import (
     WatchdogPolicy,
 )
 from agentgear.exceptions import ConfigurationError
+from agentgear.models import ModelTier, ReasoningEffort
 
 
 def test_default_policy_is_valid() -> None:
@@ -161,3 +163,55 @@ def test_policy_yaml_missing_pyyaml_raises_configuration_error(tmp_path, monkeyp
     config_file.write_text("budget:\n  max_agents: 2\n", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         Policy.from_yaml(str(config_file))
+
+
+def test_default_critical_risk_policy_is_valid() -> None:
+    cr = CriticalRiskPolicy()
+    assert cr.min_tier == ModelTier.ADVANCED
+    assert cr.min_reasoning == ReasoningEffort.HIGH
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"security_impact_at": -0.1},
+        {"security_impact_at": 1.1},
+        {"data_impact_at": -0.5},
+        {"irreversibility_at": 2.0},
+    ],
+)
+def test_critical_risk_policy_rejects_out_of_range_thresholds(kwargs: dict) -> None:
+    with pytest.raises(ConfigurationError):
+        CriticalRiskPolicy(**kwargs)
+
+
+def test_critical_risk_policy_accepts_string_tier_and_reasoning() -> None:
+    cr = CriticalRiskPolicy(min_tier="frontier", min_reasoning="max")
+    assert cr.min_tier == ModelTier.FRONTIER
+    assert cr.min_reasoning == ReasoningEffort.MAX
+
+
+def test_critical_risk_policy_rejects_unknown_tier_string() -> None:
+    with pytest.raises(ConfigurationError):
+        CriticalRiskPolicy(min_tier="not-a-tier")
+
+
+def test_critical_risk_policy_rejects_unknown_reasoning_string() -> None:
+    with pytest.raises(ConfigurationError):
+        CriticalRiskPolicy(min_reasoning="not-a-reasoning-effort")
+
+
+def test_critical_risk_policy_rejects_non_bool_require_review() -> None:
+    with pytest.raises(ConfigurationError):
+        CriticalRiskPolicy(require_review="yes")  # type: ignore[arg-type]
+
+
+def test_policy_rejects_non_critical_risk_policy_instance() -> None:
+    with pytest.raises(ConfigurationError):
+        Policy(critical_risk="not-a-policy")  # type: ignore[arg-type]
+
+
+def test_policy_from_dict_supports_critical_risk() -> None:
+    p = Policy.from_dict({"critical_risk": {"security_impact_at": 0.5, "min_tier": "frontier"}})
+    assert p.critical_risk.security_impact_at == 0.5
+    assert p.critical_risk.min_tier == ModelTier.FRONTIER

@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .exceptions import TaskProfileError
+from .exceptions import InvalidObservationError, TaskProfileError
 
 # --------------------------------------------------------------------------
 # Ordered enums
@@ -128,6 +128,22 @@ def _validate_non_negative_int(name: str, value: int) -> int:
         raise TaskProfileError(f"{name} must be an int, got {type(value).__name__}")
     if value < 0:
         raise TaskProfileError(f"{name} must be >= 0, got {value}")
+    return value
+
+
+def _validate_observation_timestamp(name: str, value: float) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise InvalidObservationError(f"{name} must be a number, got {type(value).__name__}")
+    if math.isnan(value) or math.isinf(value):
+        raise InvalidObservationError(f"{name} must be finite, got {value}")
+    if value < 0:
+        raise InvalidObservationError(f"{name} must be >= 0, got {value}")
+    return float(value)
+
+
+def _validate_non_blank_str(name: str, value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidObservationError(f"{name} must be a non-empty, non-blank string")
     return value
 
 
@@ -293,6 +309,18 @@ class ProgressEvent:
     description: str
     at_seconds: float
     evidence: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "description", _validate_non_blank_str("description", self.description)
+        )
+        object.__setattr__(
+            self, "at_seconds", _validate_observation_timestamp("at_seconds", self.at_seconds)
+        )
+        if not isinstance(self.kind, ProgressSignalKind):
+            raise InvalidObservationError(
+                f"kind must be a ProgressSignalKind, got {type(self.kind).__name__}"
+            )
 
 
 @dataclass(frozen=True)

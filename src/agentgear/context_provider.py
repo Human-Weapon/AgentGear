@@ -8,6 +8,19 @@ AgentGear never imports PromptGraph at module load time. Availability is
 checked at call time via ``_sibling_utils``; if PromptGraph is not
 installed (or its API surface doesn't behave as expected), callers get a
 ``ContextPackage`` back with clear provenance instead of a crash.
+
+AG-08 provenance contract:
+
+* ``used_tokens`` is always the estimated token count of the ACTUAL
+  ``content`` string, including separators between joined chunks — never
+  a sum of pre-join chunk estimates that could understate the real size.
+  ``used_tokens <= budget_tokens`` holds by construction: a candidate
+  chunk is only accepted if the resulting *joined* content still fits.
+* ``constraints_requested`` records what the caller asked for.
+  ``constraints_applied`` records what was actually enforced. v0.1.0
+  implements no constraint enforcement at all, so every provider reports
+  ``constraints_applied=()`` — never claiming credit for filtering that
+  never happened.
 """
 
 from __future__ import annotations
@@ -41,6 +54,7 @@ class ContextPackage:
     budget_tokens: int
     used_tokens: int
     source: str
+    constraints_requested: tuple[str, ...] = field(default_factory=tuple)
     constraints_applied: tuple[str, ...] = field(default_factory=tuple)
     note: str = ""
 
@@ -69,7 +83,8 @@ class DefaultContextProvider(ContextProvider):
             budget_tokens=request.budget_tokens,
             used_tokens=0,
             source="default",
-            constraints_applied=request.constraints,
+            constraints_requested=request.constraints,
+            constraints_applied=(),
             note=(
                 "no context backend is configured; install and wire a ContextProvider "
                 "(e.g. PromptGraphContextProvider) to receive real context packages"
@@ -79,7 +94,7 @@ class DefaultContextProvider(ContextProvider):
 
 def _approx_token_count(text: str) -> int:
     # Deterministic, provider-agnostic estimate: ~4 chars/token.
-    return max(1, len(text) // 4)
+    return max(1, len(text) // 4) if text else 0
 
 
 class PromptGraphContextProvider(ContextProvider):
@@ -97,6 +112,12 @@ class PromptGraphContextProvider(ContextProvider):
     def __init__(
         self, promptgraph_instance: object | None = None, *, search_limit: int = 10
     ) -> None:
+        if isinstance(search_limit, bool) or not isinstance(search_limit, int):
+            raise ConfigurationError(
+                f"search_limit must be an int, got {type(search_limit).__name__}"
+            )
+        if search_limit <= 0:
+            raise ConfigurationError(f"search_limit must be > 0, got {search_limit}")
         self._instance = promptgraph_instance
         self._search_limit = search_limit
         self._fallback = DefaultContextProvider()
@@ -135,25 +156,28 @@ class PromptGraphContextProvider(ContextProvider):
             )
 
         chunks: list[str] = []
-        used_tokens = 0
         for entry in results or []:
             content = str(entry.get("content", "")) if isinstance(entry, dict) else str(entry)
             if not content:
                 continue
-            tokens = _approx_token_count(content)
-            if used_tokens + tokens > request.budget_tokens:
+            # Check the token count of the ACTUAL joined result (chunk
+            # separators included) before committing to a chunk — never
+            # the chunk's isolated token count, which understates the
+            # real cost once chunks are joined (AG-08).
+            candidate = "\n\n".join([*chunks, content])
+            if _approx_token_count(candidate) > request.budget_tokens:
                 break
             chunks.append(content)
-            used_tokens += tokens
 
         combined = "\n\n".join(chunks)
         return ContextPackage(
             topic=request.topic,
             content=combined,
             budget_tokens=request.budget_tokens,
-            used_tokens=used_tokens,
+            used_tokens=_approx_token_count(combined),
             source="promptgraph",
-            constraints_applied=request.constraints,
+            constraints_requested=request.constraints,
+            constraints_applied=(),
             note=f"{len(chunks)} of {len(results or [])} matching memory entries fit the budget",
         )
 

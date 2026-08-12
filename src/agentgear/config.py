@@ -300,6 +300,68 @@ class ModelTierMapping:
         return self.mapping[tier.value]
 
 
+def _coerce_tier(name: str, value: ModelTier | str) -> ModelTier:
+    if isinstance(value, ModelTier):
+        return value
+    if isinstance(value, str):
+        if value not in _VALID_TIERS:
+            raise ConfigurationError(
+                f"{name} '{value}' is not a known model tier; valid tiers are "
+                f"{sorted(_VALID_TIERS)}"
+            )
+        return ModelTier(value)
+    raise ConfigurationError(f"{name} must be a ModelTier or known string value")
+
+
+def _coerce_reasoning(name: str, value: ReasoningEffort | str) -> ReasoningEffort:
+    if isinstance(value, ReasoningEffort):
+        return value
+    if isinstance(value, str):
+        if value not in _VALID_REASONING:
+            raise ConfigurationError(
+                f"{name} '{value}' is not a known reasoning effort; valid values are "
+                f"{sorted(_VALID_REASONING)}"
+            )
+        return ReasoningEffort(value)
+    raise ConfigurationError(f"{name} must be a ReasoningEffort or known string value")
+
+
+@dataclass(frozen=True)
+class CriticalRiskPolicy:
+    """Per-signal critical-risk floors, independent of the blended risk
+    score (AG-03).
+
+    A single maxed-out individual risk signal (e.g. ``security_impact=1.0``
+    on an otherwise trivial task) must not be diluted into a merely "low"
+    blended risk score and routed cheaply. When any of these thresholds is
+    met, routing is floored at ``min_tier``/``min_reasoning`` and planning
+    forces an independent review, regardless of what the blended
+    complexity/risk score alone would have selected.
+    """
+
+    security_impact_at: float = 0.85
+    data_impact_at: float = 0.85
+    irreversibility_at: float = 0.85
+    min_tier: ModelTier = ModelTier.ADVANCED
+    min_reasoning: ReasoningEffort = ReasoningEffort.HIGH
+    require_review: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("security_impact_at", "data_impact_at", "irreversibility_at"):
+            v = _require_non_negative(f"critical_risk.{name}", getattr(self, name))
+            if v > 1.0:
+                raise ConfigurationError(f"critical_risk.{name} must be <= 1.0, got {v}")
+            object.__setattr__(self, name, v)
+        object.__setattr__(self, "min_tier", _coerce_tier("critical_risk.min_tier", self.min_tier))
+        object.__setattr__(
+            self,
+            "min_reasoning",
+            _coerce_reasoning("critical_risk.min_reasoning", self.min_reasoning),
+        )
+        if not isinstance(self.require_review, bool):
+            raise ConfigurationError("critical_risk.require_review must be a bool")
+
+
 @dataclass(frozen=True)
 class Policy:
     """Top-level AgentGear configuration."""
@@ -310,6 +372,7 @@ class Policy:
     watchdog: WatchdogPolicy = field(default_factory=WatchdogPolicy)
     budget: BudgetPolicy = field(default_factory=BudgetPolicy)
     model_tier_mapping: ModelTierMapping = field(default_factory=ModelTierMapping)
+    critical_risk: CriticalRiskPolicy = field(default_factory=CriticalRiskPolicy)
     default_reasoning_floor: ReasoningEffort = ReasoningEffort.LOW
     multi_agent_risk_threshold: float = 0.5
     multi_agent_complexity_threshold: float = 0.55
@@ -327,6 +390,8 @@ class Policy:
             raise ConfigurationError("budget must be a BudgetPolicy instance")
         if not isinstance(self.model_tier_mapping, ModelTierMapping):
             raise ConfigurationError("model_tier_mapping must be a ModelTierMapping instance")
+        if not isinstance(self.critical_risk, CriticalRiskPolicy):
+            raise ConfigurationError("critical_risk must be a CriticalRiskPolicy instance")
         if isinstance(self.default_reasoning_floor, str):
             if self.default_reasoning_floor not in _VALID_REASONING:
                 raise ConfigurationError(
@@ -397,6 +462,8 @@ class Policy:
                 kwargs["model_tier_mapping"] = ModelTierMapping(mapping=raw)
             else:
                 raise ConfigurationError("model_tier_mapping must be a mapping of tier -> model")
+        if "critical_risk" in data:
+            kwargs["critical_risk"] = _build(CriticalRiskPolicy, data["critical_risk"])
         for scalar in (
             "default_reasoning_floor",
             "multi_agent_risk_threshold",

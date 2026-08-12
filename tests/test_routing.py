@@ -97,3 +97,64 @@ def test_default_reasoning_floor_is_respected() -> None:
     p = Policy(default_reasoning_floor=ReasoningEffort.MEDIUM)
     effort, _ = select_reasoning_effort(_assessment(0.0), _risk(0.0), p)
     assert effort.rank >= ReasoningEffort.MEDIUM.rank
+
+
+# --- P3: latency_weight must have an observable, deterministic effect -----
+
+
+def test_latency_weight_favors_cheaper_tier_like_cost_weight() -> None:
+    """latency_weight shares cost_weight's direction (both push toward
+    cheaper/faster tiers; quality_weight pushes the other way). A policy
+    that is latency-heavy must therefore route at least as cheaply as the
+    neutral default for the same task, and strictly cheaper than a
+    quality-heavy policy.
+    """
+    score = _assessment(0.5)
+    risk = _risk(0.5)
+
+    neutral = Policy(
+        routing_weights=RoutingWeights(cost_weight=0.0, quality_weight=1.0, latency_weight=0.0)
+    )
+    latency_heavy = Policy(
+        routing_weights=RoutingWeights(cost_weight=0.0, quality_weight=0.0, latency_weight=1.0)
+    )
+
+    neutral_tier, _ = select_model_tier(score, risk, neutral)
+    latency_tier, _ = select_model_tier(score, risk, latency_heavy)
+    assert latency_tier.rank <= neutral_tier.rank
+    assert latency_tier.rank < neutral_tier.rank
+
+
+def test_latency_weight_alone_matches_equivalent_cost_weight_bias() -> None:
+    """cost_weight=1.0 and latency_weight=1.0 (each alone, quality=0) must
+    produce the identical threshold shift: the fix treats them as sharing
+    one bias term, not two independent, disconnected axes."""
+    score = _assessment(0.5)
+    risk = _risk(0.5)
+
+    cost_only = Policy(
+        routing_weights=RoutingWeights(cost_weight=1.0, quality_weight=0.0, latency_weight=0.0)
+    )
+    latency_only = Policy(
+        routing_weights=RoutingWeights(cost_weight=0.0, quality_weight=0.0, latency_weight=1.0)
+    )
+    tier_a, rationale_a = select_model_tier(score, risk, cost_only)
+    tier_b, rationale_b = select_model_tier(score, risk, latency_only)
+    assert tier_a == tier_b
+
+
+def test_latency_weight_is_not_silently_ignored() -> None:
+    """Direct regression for the P3 finding: latency_weight used to be
+    computed and then discarded, so any value produced the same routing
+    as latency_weight=0. That must no longer be true."""
+    score = _assessment(0.5)
+    risk = _risk(0.5)
+    zero_latency = Policy(
+        routing_weights=RoutingWeights(cost_weight=0.0, quality_weight=1.0, latency_weight=0.0)
+    )
+    full_latency = Policy(
+        routing_weights=RoutingWeights(cost_weight=0.0, quality_weight=1.0, latency_weight=1.0)
+    )
+    tier_zero, _ = select_model_tier(score, risk, zero_latency)
+    tier_full, _ = select_model_tier(score, risk, full_latency)
+    assert tier_zero != tier_full

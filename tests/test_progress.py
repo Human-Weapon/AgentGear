@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import math
+
+import pytest
+
+from agentgear.exceptions import InvalidObservationError
 from agentgear.models import ProgressEvent, ProgressSignalKind
 from agentgear.watchdog.progress import ProgressTracker
 
@@ -36,3 +41,23 @@ def test_has_progress_since_only_counts_later_events() -> None:
     )
     assert tracker.has_progress_since(1.0) is True
     assert tracker.has_progress_since(10.0) is False
+
+
+# --- AG-06: ProgressEvent must not accept bogus progress -------------------
+
+
+@pytest.mark.parametrize("description", ["", "   "])
+def test_progress_event_rejects_blank_description(description: str) -> None:
+    with pytest.raises(InvalidObservationError):
+        ProgressEvent(kind=ProgressSignalKind.FILE_CHANGED, description=description, at_seconds=1.0)
+
+
+@pytest.mark.parametrize("at_seconds", [-1.0, math.nan, math.inf])
+def test_progress_event_rejects_invalid_timestamp(at_seconds: float) -> None:
+    with pytest.raises(InvalidObservationError):
+        ProgressEvent(kind=ProgressSignalKind.FILE_CHANGED, description="x", at_seconds=at_seconds)
+
+
+def test_progress_event_rejects_non_kind_enum() -> None:
+    with pytest.raises(InvalidObservationError):
+        ProgressEvent(kind="file_changed", description="x", at_seconds=1.0)  # type: ignore[arg-type]

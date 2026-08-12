@@ -60,9 +60,40 @@ def reasoning_score(complexity: ComplexityAssessment, risk: RiskAssessment) -> f
     return max(0.0, min(1.0, 0.35 * complexity.score + 0.65 * risk.score))
 
 
+def critical_signal_reasons(risk: RiskAssessment, policy: Policy) -> tuple[str, ...]:
+    """Individual-signal critical-risk triggers (AG-03), independent of the
+    blended risk score. A single maxed-out signal (e.g.
+    ``security_impact=1.0`` on an otherwise trivial task) must not be
+    diluted into a merely "low" blended score and routed cheaply.
+    """
+    cr = policy.critical_risk
+    security = risk.factors.get("security_impact", 0.0)
+    data = risk.factors.get("data_impact", 0.0)
+    irreversibility = risk.factors.get("irreversibility", 0.0)
+
+    reasons: list[str] = []
+    if security >= cr.security_impact_at:
+        reasons.append(f"security_impact={security:.2f} >= {cr.security_impact_at:.2f}")
+    if data >= cr.data_impact_at:
+        reasons.append(f"data_impact={data:.2f} >= {cr.data_impact_at:.2f}")
+    if irreversibility >= cr.irreversibility_at:
+        reasons.append(f"irreversibility={irreversibility:.2f} >= {cr.irreversibility_at:.2f}")
+    return tuple(reasons)
+
+
 def _threshold_shift(policy: Policy) -> float:
-    cw, qw, _lw = policy.routing_weights.normalized()
-    bias = cw - qw  # positive => cost-dominant => raise thresholds => cheaper tiers favored
+    """Cost AND latency both push toward cheaper/faster tiers; quality
+    pushes toward richer ones. Higher tiers cost more compute per call,
+    and in this provider-agnostic model that compute cost is treated as
+    the proxy for latency too (a FRONTIER call is assumed slower than a
+    FAST one) — so ``latency_weight`` shares cost's sign in the bias
+    rather than being a third, disconnected axis. This keeps the shift
+    formula a single documented, deterministic number instead of two
+    weights that could point in unrelated directions with no combined
+    meaning.
+    """
+    cw, qw, lw = policy.routing_weights.normalized()
+    bias = (cw + lw) - qw  # positive => raise thresholds => cheaper/faster tiers favored
     return bias * _MAX_THRESHOLD_SHIFT
 
 
@@ -107,6 +138,15 @@ def select_model_tier(
         )
         tier = _CRITICAL_RISK_MIN_TIER
 
+    signal_reasons = critical_signal_reasons(risk, policy)
+    min_tier = policy.critical_risk.min_tier
+    if signal_reasons and tier.rank < min_tier.rank:
+        rationale.append(
+            f"critical individual risk signal override ({'; '.join(signal_reasons)}) "
+            f"forces minimum tier {min_tier.value}"
+        )
+        tier = min_tier
+
     return tier, tuple(rationale)
 
 
@@ -135,11 +175,21 @@ def select_reasoning_effort(
     if effort.rank < policy.default_reasoning_floor.rank:
         effort = policy.default_reasoning_floor
 
-    rationale = (
+    rationale = [
         f"reasoning_score={score:.2f} "
-        f"(complexity_weight=0.35, risk_weight=0.65) -> effort={effort.value}",
-    )
-    return effort, rationale
+        f"(complexity_weight=0.35, risk_weight=0.65) -> effort={effort.value}"
+    ]
+
+    signal_reasons = critical_signal_reasons(risk, policy)
+    min_reasoning = policy.critical_risk.min_reasoning
+    if signal_reasons and effort.rank < min_reasoning.rank:
+        rationale.append(
+            f"critical individual risk signal override ({'; '.join(signal_reasons)}) "
+            f"forces minimum reasoning {min_reasoning.value}"
+        )
+        effort = min_reasoning
+
+    return effort, tuple(rationale)
 
 
 def route(

@@ -41,7 +41,9 @@ def test_scenario_a_activity_without_progress_reaches_stalled() -> None:
         ActivityRecord(at_seconds=40.0 + i, fingerprint=f"activity-{i}", succeeded=True)
         for i in range(3)
     ]
-    verdict = detector.evaluate(now=100.0, last_progress_at=5.0, recent_activities=activities)
+    verdict = detector.evaluate(
+        now=100.0, started_at=0.0, last_progress_at=5.0, recent_activities=activities
+    )
 
     assert verdict.is_stalled is True
     sm.transition(ExecutionState.STALLED, at_seconds=100.0, note="; ".join(verdict.reasons))
@@ -61,7 +63,9 @@ def test_scenario_b_repeated_identical_failure_stalls_then_recovers() -> None:
             at_seconds=2.0, fingerprint="pytest -k foo", succeeded=False, error="AssertionError"
         ),
     ]
-    verdict = detector.evaluate(now=3.0, last_progress_at=None, recent_activities=activities)
+    verdict = detector.evaluate(
+        now=3.0, started_at=0.0, last_progress_at=None, recent_activities=activities
+    )
     assert verdict.is_stalled is True
 
     sm.transition(ExecutionState.STALLED, at_seconds=3.0)
@@ -144,7 +148,9 @@ def test_scenario_f_trivial_command_abnormally_slow_repeatedly_signals_stall() -
         )
         for i in range(3)
     ]
-    verdict = detector.evaluate(now=1300.0, last_progress_at=None, recent_activities=activities)
+    verdict = detector.evaluate(
+        now=1300.0, started_at=0.0, last_progress_at=None, recent_activities=activities
+    )
     assert verdict.is_stalled is True
     assert any("trivial" in r for r in verdict.reasons)
 
@@ -156,7 +162,9 @@ def test_scenario_g_circular_reasoning_without_new_evidence_is_no_progress() -> 
         ActivityRecord(at_seconds=float(i), fingerprint="re-analyze the same file", succeeded=True)
         for i in range(5)
     ]
-    verdict = detector.evaluate(now=10.0, last_progress_at=None, recent_activities=activities)
+    verdict = detector.evaluate(
+        now=10.0, started_at=0.0, last_progress_at=None, recent_activities=activities
+    )
     assert verdict.is_stalled is True
     assert any("circular" in r for r in verdict.reasons)
 

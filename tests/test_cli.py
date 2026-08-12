@@ -74,6 +74,13 @@ def test_status_missing_execution_exits_one(tmp_path, capsys) -> None:
     assert "no heartbeat found" in capsys.readouterr().err
 
 
+def test_status_corrupt_heartbeat_exits_one_cleanly(tmp_path, capsys) -> None:
+    (tmp_path / "exec-1.heartbeat.json").write_text("{}", encoding="utf-8")
+    code = main(["status", "--state-dir", str(tmp_path), "--execution-id", "exec-1"])
+    assert code == 1
+    assert "error:" in capsys.readouterr().err
+
+
 def test_status_reports_heartbeat_and_checkpoint(tmp_path, capsys) -> None:
     writer = HeartbeatWriter(tmp_path)
     writer.write(
@@ -120,3 +127,11 @@ def test_cli_works_with_no_network_or_api_keys(monkeypatch, capsys) -> None:
         monkeypatch.delenv(var, raising=False)
     code = main(["plan", "--task", "x", "--json"])
     assert code == 0
+
+
+def test_simulate_rejects_out_of_range_uncertainty_cleanly(capsys) -> None:
+    code = main(["simulate", "--task", "x", "--uncertainty", "999.0"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "uncertainty" in err

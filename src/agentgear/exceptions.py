@@ -49,6 +49,20 @@ class NotCompletedError(WatchdogError):
     """Raised when COMPLETED is asserted without sufficient evidence."""
 
 
+class InvalidObservationError(WatchdogError):
+    """Raised when a caller reports invalid activity/progress/escalation
+    signals to the watchdog coordinator: non-finite or negative numbers,
+    out-of-range fractions, backwards/decreasing timestamps, or blank
+    mandatory text. A stuck agent must not be able to keep itself "alive"
+    by feeding the watchdog garbage."""
+
+
+class InvalidBlockedReportError(WatchdogError):
+    """Raised when a BLOCKED report would be missing meaningful content
+    (blank blocker/root_cause/recommendation, negative attempts, ...).
+    BLOCKED must always carry a report a human can act on."""
+
+
 # --- Neutral persistence hierarchy (shared with checkpoints/heartbeats) ---
 
 

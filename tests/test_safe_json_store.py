@@ -75,3 +75,50 @@ def test_quarantine_invalid_raises_and_moves_file(tmp_path) -> None:
     with pytest.raises(CorruptStorageError):
         store.quarantine_invalid("schema mismatch")
     assert not path.exists()
+
+
+def test_write_atomic_retries_transient_permission_error_on_replace(tmp_path, monkeypatch) -> None:
+    """Regression: real multi-process runs on Windows intermittently hit
+    PermissionError (WinError 5) on the final rename/replace, even while
+    holding our own lock -- almost certainly antivirus/indexer briefly
+    opening the just-written file. The first N replace attempts must be
+    retried transparently instead of surfacing a spurious failure."""
+    import pathlib
+
+    from agentgear import safe_json_store as sjs_module
+
+    store = SafeJsonStore(tmp_path / "data.json", default=dict)
+
+    calls = {"count": 0}
+    real_replace = pathlib.Path.replace
+
+    def flaky_replace(self, target):
+        calls["count"] += 1
+        if calls["count"] <= 3:
+            raise PermissionError("simulated transient WinError 5")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", flaky_replace)
+    monkeypatch.setattr(sjs_module, "_REPLACE_RETRY_DELAY_S", 0.0)
+
+    store.write_atomic({"a": 1})
+    assert calls["count"] == 4
+    monkeypatch.undo()
+    assert store.read() == {"a": 1}
+
+
+def test_write_atomic_gives_up_after_exhausting_replace_retries(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    from agentgear import safe_json_store as sjs_module
+
+    store = SafeJsonStore(tmp_path / "data.json", default=dict)
+
+    def always_denied(self, target):
+        raise PermissionError("simulated persistent WinError 5")
+
+    monkeypatch.setattr(pathlib.Path, "replace", always_denied)
+    monkeypatch.setattr(sjs_module, "_REPLACE_RETRY_DELAY_S", 0.0)
+
+    with pytest.raises(PermissionError):
+        store.write_atomic({"a": 1})

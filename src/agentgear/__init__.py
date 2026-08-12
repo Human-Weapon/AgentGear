@@ -1,10 +1,19 @@
 """AgentGear — adaptive compute orchestrator for AI software-engineering agents.
 
+AgentGear has two public layers:
+
+  PLANNING:            TaskProfile -> ExecutionPlan     (``analyze``, ``plan``)
+  RUNTIME SUPERVISION: ``ExecutionWatchdog``             (state machine + stall
+                        detection + bounded recovery + cumulative budget)
+
 AgentGear decides HOW a task should be executed: which model tier, how
 much reasoning effort, how many agents, which roles, when to escalate,
 and when to stop because something is stuck. It does not decide WHAT
 CONTEXT to load (PromptGraph), whether a skill is safe (SkillGuard), or
-what strategy performed best historically (AgentBench).
+what strategy performed best historically (AgentBench). Its
+``ExecutionWatchdog`` supervises the *state* of an execution that an
+external runtime drives; AgentGear does not call real LLM/provider APIs
+or own a provider process itself.
 """
 
 from __future__ import annotations
@@ -12,8 +21,10 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .api import analyze, plan
+from .budget import ExecutionBudgetLedger, ReservationKind, ReservationState
 from .config import (
     BudgetPolicy,
+    CriticalRiskPolicy,
     ModelTierMapping,
     Policy,
     ReasoningThresholds,
@@ -21,11 +32,14 @@ from .config import (
     RoutingWeights,
     WatchdogPolicy,
 )
+from .escalation import EscalationDecision, EscalationSignals, decide_escalation
 from .exceptions import (
     AgentGearError,
     BudgetExceededError,
     ConfigurationError,
     CorruptStorageError,
+    InvalidBlockedReportError,
+    InvalidObservationError,
     InvalidStateTransitionError,
     NotCompletedError,
     PathEscapeError,
@@ -54,10 +68,12 @@ from .models import (
     ProgressSignalKind,
     ReasoningEffort,
     RecoveryAttempt,
+    RecoveryResult,
     RiskAssessment,
     RiskLevel,
     TaskProfile,
 )
+from .watchdog import ExecutionWatchdog
 
 __all__ = [
     "__version__",
@@ -69,6 +85,7 @@ __all__ = [
     "ReasoningThresholds",
     "WatchdogPolicy",
     "BudgetPolicy",
+    "CriticalRiskPolicy",
     "ModelTierMapping",
     "TaskProfile",
     "ComplexityAssessment",
@@ -87,8 +104,16 @@ __all__ = [
     "ProgressSignalKind",
     "Checkpoint",
     "RecoveryAttempt",
+    "RecoveryResult",
     "BlockedReport",
     "Heartbeat",
+    "ExecutionWatchdog",
+    "ExecutionBudgetLedger",
+    "ReservationKind",
+    "ReservationState",
+    "EscalationSignals",
+    "EscalationDecision",
+    "decide_escalation",
     "AgentGearError",
     "ConfigurationError",
     "TaskProfileError",
@@ -99,6 +124,8 @@ __all__ = [
     "WatchdogError",
     "RecoveryExhaustedError",
     "NotCompletedError",
+    "InvalidObservationError",
+    "InvalidBlockedReportError",
     "PersistenceError",
     "StorageLockError",
     "CorruptStorageError",

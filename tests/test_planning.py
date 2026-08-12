@@ -158,3 +158,48 @@ def test_planning_is_deterministic(moderate_profile: TaskProfile, policy: Policy
     assert a.primary_model == b.primary_model
     assert a.strategy == b.strategy
     assert a.context_budget_tokens == b.context_budget_tokens
+
+
+# --- AG-03: critical individual risk signals must not under-route ---------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"security_impact": 1.0},
+        {"data_impact": 1.0},
+        {"reversibility": 0.0},  # irreversibility = 1.0
+    ],
+)
+def test_ag03_maximal_individual_risk_signal_forces_review_and_floor(
+    kwargs: dict, policy: Policy
+) -> None:
+    profile = TaskProfile(description="otherwise trivial task", **kwargs)
+    plan = _plan(profile, policy)
+
+    assert plan.strategy.agent_count > 1, "must not remain a lone Builder"
+    assert plan.review_required is True, "must not skip review"
+    assert plan.primary_model.tier.rank >= policy.critical_risk.min_tier.rank
+    assert plan.primary_model.reasoning.rank >= policy.critical_risk.min_reasoning.rank
+
+
+def test_ag03_critical_review_can_be_disabled_via_policy() -> None:
+    from agentgear.config import CriticalRiskPolicy
+
+    lenient = Policy(critical_risk=CriticalRiskPolicy(require_review=False))
+    profile = TaskProfile(description="otherwise trivial task", security_impact=1.0)
+    plan = _plan(profile, lenient)
+    # Tier/reasoning floor still applies (routing-level), but planning no
+    # longer forces multi-agent staffing purely because of it.
+    assert plan.primary_model.tier.rank >= lenient.critical_risk.min_tier.rank
+    assert plan.strategy.agent_count == 1
+
+
+def test_ag03_critical_thresholds_are_configurable() -> None:
+    from agentgear.config import CriticalRiskPolicy
+
+    strict = Policy(critical_risk=CriticalRiskPolicy(security_impact_at=0.4))
+    profile = TaskProfile(description="mild security task", security_impact=0.5)
+    plan = _plan(profile, strict)
+    assert plan.primary_model.tier.rank >= strict.critical_risk.min_tier.rank
+    assert plan.review_required is True

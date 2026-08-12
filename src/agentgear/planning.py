@@ -36,7 +36,7 @@ from .models import (
     RiskAssessment,
     TaskProfile,
 )
-from .routing import estimate_cost, route
+from .routing import critical_signal_reasons, estimate_cost, route
 
 _RESEARCHER_AMBIGUITY_THRESHOLD = 0.5
 _DUAL_RESEARCHER_AMBIGUITY_THRESHOLD = 0.75
@@ -71,12 +71,15 @@ def build_execution_strategy(
     ambiguity = complexity.factors.get("ambiguity", 0.0)
     architectural_impact = complexity.factors.get("architectural_impact", 0.0)
     prior_failure_signal = risk.factors.get("prior_failures", 0.0)
+    critical_reasons = critical_signal_reasons(risk, policy)
+    critical_forces_review = bool(critical_reasons) and policy.critical_risk.require_review
     needs_multi_agent = (
         complexity.score >= policy.multi_agent_complexity_threshold
         or risk.score >= policy.multi_agent_risk_threshold
         or ambiguity >= _RESEARCHER_AMBIGUITY_THRESHOLD
         or architectural_impact >= _PLANNER_ARCHITECTURAL_THRESHOLD
         or prior_failure_signal >= 0.5
+        or critical_forces_review
     )
 
     rationale: list[str] = [
@@ -87,6 +90,11 @@ def build_execution_strategy(
         f"ambiguity={ambiguity:.2f}, architectural_impact={architectural_impact:.2f}, "
         f"prior_failure_signal={prior_failure_signal:.2f})"
     ]
+    if critical_reasons:
+        rationale.append(
+            f"critical individual risk signal(s) present: {'; '.join(critical_reasons)}"
+            + (" (forces independent review)" if critical_forces_review else "")
+        )
 
     if not needs_multi_agent:
         rationale.append("single Builder agent: low complexity and low risk")
