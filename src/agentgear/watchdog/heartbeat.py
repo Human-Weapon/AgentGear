@@ -32,6 +32,7 @@ from typing import Any
 
 from ..exceptions import InvalidObservationError
 from ..models import ExecutionState, Heartbeat
+from ..path_security import validate_persistence_safe_id
 from ..safe_json_store import SafeJsonStore
 
 _MISSING = object()
@@ -143,6 +144,11 @@ class HeartbeatWriter:
         self.state_dir = Path(state_dir)
 
     def _store(self, execution_id: str) -> SafeJsonStore:
+        # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too
+        # long, illegal filename characters) immediately, before it can
+        # reach a filesystem call and eventually surface a confusing
+        # ~10s-later StorageLockError instead of the real problem.
+        validate_persistence_safe_id("execution_id", execution_id)
         path = self.state_dir / f"{execution_id}.heartbeat.json"
         # A dedicated sentinel (not `None`) marks "file does not exist" —
         # `None` is itself valid JSON (`null`), so reusing it as the

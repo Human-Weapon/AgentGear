@@ -77,12 +77,20 @@ def test_heartbeat_writer_survives_concurrent_processes(tmp_path, num_workers: i
     assert result.attempt_count >= 0
 
 
-@pytest.mark.parametrize("num_workers", [2, 5])
+@pytest.mark.parametrize("num_workers", [2, 5, 10])
 def test_checkpoint_store_survives_concurrent_processes(tmp_path, num_workers: int) -> None:
-    from agentgear.checkpoints import CheckpointStore
+    """Round 4 / NEW-06: re-verified against the SEGMENTED storage design.
+    ``iterations`` is sized so concurrent workers collectively span
+    multiple segment rollovers (not just appends within one segment),
+    which is the new race surface the segmented design introduces --
+    ``append()``'s "peek a target segment, then update() under lock"
+    pattern must never lose an entry even when multiple processes decide
+    to roll over to the same next segment at once.
+    """
+    from agentgear.checkpoints import _SEGMENT_CAPACITY, CheckpointStore
 
     state_dir = str(tmp_path)
-    iterations = 10
+    iterations = max(10, (2 * _SEGMENT_CAPACITY) // max(num_workers, 1))
     _run_workers(
         _append_checkpoint_worker, [(state_dir, i, iterations) for i in range(num_workers)]
     )
@@ -90,7 +98,7 @@ def test_checkpoint_store_survives_concurrent_processes(tmp_path, num_workers: i
     history = CheckpointStore(state_dir).all("shared-exec")
     # Every acknowledged checkpoint from every worker must survive --
     # concurrent appends must never silently lose an entry via a lost
-    # update (read-modify-write race).
+    # update (read-modify-write race), even across segment rollovers.
     assert len(history) == num_workers * iterations
     phases = {c.phase for c in history}
     assert len(phases) == num_workers * iterations, "some checkpoint entries were overwritten/lost"

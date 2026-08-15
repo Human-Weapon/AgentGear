@@ -5,7 +5,7 @@ get" (phase, completed/pending subtasks, last good state) — not a full
 snapshot system. Callers append checkpoints as they reach them; recovery
 and BLOCKED reporting read the most recent one back.
 
-AG-07: valid JSON is not valid state. The checkpoint history file's root
+AG-07: valid JSON is not valid state. Each checkpoint segment file's root
 must be a list of well-formed checkpoint objects; anything else (``{}``,
 a bare object instead of a list, missing fields, wrong types) is
 quarantined and reported as ``CorruptStorageError`` rather than raising a
@@ -17,18 +17,63 @@ validator and as the deserializer — so a schema-valid-but-domain-invalid
 entry (e.g. a whitespace-only ``last_good_state``) cannot escape as a raw
 ``InvalidObservationError``; every failure mode normalizes to
 ``ValueError`` for ``SafeJsonStore``'s single quarantine path.
+
+Round 4 / NEW-06: SEGMENTED storage, not one ever-growing file.
+
+The original design kept one JSON file per execution containing the
+FULL checkpoint history, and every ``append()`` read the whole file,
+parsed it, appended one entry, re-serialized the whole (now one-longer)
+list, and atomically rewrote it. Each append therefore did O(history
+length) work, and N appends over one execution's lifetime did O(N^2)
+total work -- for a long-running execution this made checkpointing
+progressively, unboundedly slower the longer the execution had already
+run, exactly the executions checkpoints exist to protect.
+
+The fix: each execution's history lives in a directory of bounded
+SEGMENT files (``{execution_id}.checkpoints/segment-NNNNNN.json``), each
+holding at most ``_SEGMENT_CAPACITY`` checkpoints. ``append()`` only ever
+reads/rewrites the CURRENT (newest, not-yet-full) segment -- bounded by
+``_SEGMENT_CAPACITY``, independent of total history length -- rolling
+over to a fresh segment once the active one is full. ``latest()`` only
+ever needs to read the single newest segment. ``all()`` still reads every
+segment (unavoidable -- returning the full history requires touching all
+of it), but even that remains a simple, linear concatenation.
+
+v0.1.0 has not shipped yet, so this replaces the single-file format
+outright rather than carrying migration code for an on-disk format that
+was never released (Round 4 / section 9.6).
+
+Durability/concurrency/corruption-quarantine/path-containment guarantees
+are unchanged and re-verified per segment: each segment is its own
+``SafeJsonStore`` (atomic replace, fsync, real cross-process file lock,
+containment-checked against ``trusted_root``). A corrupt segment is
+quarantined and reported WITHOUT touching any other (healthy) segment --
+segmenting makes quarantine strictly more surgical than the single-file
+design, where the corrupt part and "the whole history" were the same
+file.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from .exceptions import InvalidObservationError
 from .models import Checkpoint
+from .path_security import validate_persistence_safe_id
 from .safe_json_store import SafeJsonStore
 
 _MISSING = object()
+
+# Checkpoints per segment file. A fixed, small constant -- NOT derived
+# from total history length -- is what bounds per-append work. Chosen
+# generously enough that most short-lived executions never roll over past
+# segment 1, while keeping any single segment's read/rewrite cost small
+# even for a very long-running execution.
+_SEGMENT_CAPACITY = 100
+
+_SEGMENT_NAME_RE = re.compile(r"segment-(\d{6})\.json$")
 
 
 def _to_dict(cp: Checkpoint) -> dict:
@@ -69,54 +114,121 @@ def _construct_entry(entry: Any, index: int) -> Checkpoint:
         raise ValueError(f"checkpoint[{index}]: {exc}") from exc
 
 
-def _validate_history_schema(data: Any) -> Any:
-    """``SafeJsonStore`` validator: construct every entry purely to
-    validate it, then return the ORIGINAL data so the on-disk
-    representation stays plain JSON."""
+def _validate_segment_schema(data: Any) -> Any:
+    """``SafeJsonStore`` validator: construct every entry in ONE segment
+    purely to validate it (bounded by ``_SEGMENT_CAPACITY``), then return
+    the ORIGINAL data so the on-disk representation stays plain JSON."""
     if not isinstance(data, list):
-        raise ValueError(f"checkpoint history must be a list, got {type(data).__name__}")
+        raise ValueError(f"checkpoint segment must be a list, got {type(data).__name__}")
     for i, entry in enumerate(data):
         _construct_entry(entry, i)
     return data
 
 
 class CheckpointStore:
-    """Append-only checkpoint history for one state directory, one file
-    per execution_id, path-contained and concurrency-safe.
+    """Append-only, SEGMENTED checkpoint history for one state directory,
+    one directory per execution_id, path-contained and concurrency-safe.
+    See the module docstring (Round 4 / NEW-06) for why this is segmented
+    rather than one ever-growing file.
     """
 
     def __init__(self, state_dir: str | Path) -> None:
         self.state_dir = Path(state_dir)
 
-    def _store(self, execution_id: str) -> SafeJsonStore:
-        path = self.state_dir / f"{execution_id}.checkpoints.json"
-        # `_MISSING` (not the empty list `[]`) marks "file does not exist",
-        # so a checkpoint file corrupted into literal JSON `null` is never
-        # silently mistaken for a legitimate, merely-empty history.
+    def _segment_dir(self, execution_id: str) -> Path:
+        # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too
+        # long, illegal filename characters) immediately -- it becomes a
+        # literal directory-name component here, before it can reach a
+        # filesystem call and eventually surface a confusing ~10s-later
+        # StorageLockError instead of the real problem.
+        validate_persistence_safe_id("execution_id", execution_id)
+        return self.state_dir / f"{execution_id}.checkpoints"
+
+    def _segment_path(self, execution_id: str, segment_number: int) -> Path:
+        return self._segment_dir(execution_id) / f"segment-{segment_number:06d}.json"
+
+    def _segment_numbers(self, execution_id: str) -> list[int]:
+        seg_dir = self._segment_dir(execution_id)
+        if not seg_dir.is_dir():
+            return []
+        numbers = []
+        for entry in seg_dir.iterdir():
+            match = _SEGMENT_NAME_RE.fullmatch(entry.name)
+            if match:
+                numbers.append(int(match.group(1)))
+        return sorted(numbers)
+
+    def _segment_store(self, execution_id: str, segment_number: int) -> SafeJsonStore:
+        path = self._segment_path(execution_id, segment_number)
+        # `_MISSING` (not the empty list `[]`) marks "segment file does
+        # not exist yet", so a segment corrupted into literal JSON `null`
+        # is never silently mistaken for a legitimate, merely-empty one.
         return SafeJsonStore(
             path,
             trusted_root=self.state_dir,
             default=lambda: _MISSING,
-            validator=_validate_history_schema,
+            validator=_validate_segment_schema,
         )
 
     def append(self, checkpoint: Checkpoint) -> None:
-        store = self._store(checkpoint.execution_id)
+        execution_id = checkpoint.execution_id
+        numbers = self._segment_numbers(execution_id)
+        target = numbers[-1] if numbers else 1
+        store = self._segment_store(execution_id, target)
+
+        # Bounded peek (reads at most ONE segment, capped at
+        # _SEGMENT_CAPACITY entries) to decide whether to roll over to a
+        # fresh segment. This is advisory, not authoritative: the actual
+        # append below always goes through SafeJsonStore.update(), which
+        # re-reads the CURRENT content under a real lock before mutating,
+        # so correctness never depends on this peek being fresh. Under a
+        # rare concurrent-rollover race, a segment may end up modestly
+        # over `_SEGMENT_CAPACITY` (harmless -- entries are never lost or
+        # misordered, a segment is just briefly a little larger than the
+        # soft target) rather than ever writing to the wrong place.
+        current = store.read()
+        count = 0 if current is _MISSING else len(current)
+        if count >= _SEGMENT_CAPACITY:
+            target += 1
+            store = self._segment_store(execution_id, target)
+
         store.update(
             lambda current: [*([] if current is _MISSING else current), _to_dict(checkpoint)]
         )
 
     def all(self, execution_id: str) -> list[Checkpoint]:
-        store = self._store(execution_id)
-        data = store.read()
-        if data is _MISSING:
-            return []
-        try:
-            return [_construct_entry(entry, i) for i, entry in enumerate(data)]
-        except (ValueError, KeyError, TypeError) as exc:
-            store.quarantine_invalid(f"invalid checkpoint schema for {execution_id!r}: {exc}")
-            raise
+        result: list[Checkpoint] = []
+        for segment_number in self._segment_numbers(execution_id):
+            store = self._segment_store(execution_id, segment_number)
+            data = store.read()
+            if data is _MISSING:
+                continue
+            try:
+                result.extend(_construct_entry(entry, i) for i, entry in enumerate(data))
+            except (ValueError, KeyError, TypeError) as exc:
+                store.quarantine_invalid(
+                    f"invalid checkpoint schema for {execution_id!r} "
+                    f"segment {segment_number}: {exc}"
+                )
+                raise
+        return result
 
     def latest(self, execution_id: str) -> Checkpoint | None:
-        history = self.all(execution_id)
-        return history[-1] if history else None
+        # Only the NEWEST segment is needed -- bounded by
+        # _SEGMENT_CAPACITY, independent of total history length.
+        for segment_number in reversed(self._segment_numbers(execution_id)):
+            store = self._segment_store(execution_id, segment_number)
+            data = store.read()
+            if data is _MISSING or not data:
+                continue
+            try:
+                entries = [_construct_entry(entry, i) for i, entry in enumerate(data)]
+            except (ValueError, KeyError, TypeError) as exc:
+                store.quarantine_invalid(
+                    f"invalid checkpoint schema for {execution_id!r} "
+                    f"segment {segment_number}: {exc}"
+                )
+                raise
+            if entries:
+                return entries[-1]
+        return None

@@ -17,13 +17,75 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .exceptions import PathEscapeError
+from .exceptions import InvalidIdentifierError, PathEscapeError
+
+# Round 4 / NEW-08: a persistence identifier (execution_id) becomes a
+# literal filename/directory-name component (`{execution_id}.heartbeat.
+# json`, `{execution_id}.checkpoints/segment-NNNNNN.json`). A
+# permanently-invalid one (too long, illegal characters) must fail
+# immediately rather than reach the file-lock retry loop and eventually
+# surface a confusing StorageLockError ~10 seconds later. Scope
+# deliberately kept to what was actually reproduced as broken (length,
+# illegal characters) -- NOT chasing Windows reserved device names
+# (CON/NUL/...) or trailing dot/space edge cases, which are real but
+# much rarer and not worth the added complexity for v0.1.0.
+_MAX_PERSISTENCE_ID_LENGTH = 150
+_ILLEGAL_FILENAME_CHARS = frozenset('<>:"/\\|?*') | {chr(c) for c in range(32)}
+
+
+def validate_persistence_safe_id(name: str, value: str) -> str:
+    """Reject an identifier that can never work as a filename/directory-
+    name component, before it ever reaches a filesystem call."""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidIdentifierError(f"{name} must be a non-empty, non-blank string")
+    if len(value) > _MAX_PERSISTENCE_ID_LENGTH:
+        raise InvalidIdentifierError(
+            f"{name} must be at most {_MAX_PERSISTENCE_ID_LENGTH} characters for use as a "
+            f"filename component, got {len(value)}"
+        )
+    illegal = _ILLEGAL_FILENAME_CHARS & set(value)
+    if illegal:
+        raise InvalidIdentifierError(
+            f"{name} contains characters that are not safe in a filename: {sorted(illegal)!r}"
+        )
+    return value
 
 
 def resolve_canonical(path: str | Path) -> Path:
     """Resolve a path to its canonical form, following symlinks/junctions."""
     resolved = os.path.realpath(str(Path(path)))
     return Path(resolved)
+
+
+def resolve_via_nearest_existing_ancestor(path: str | Path) -> Path:
+    """Round 4 / NEW-08: canonicalize a path that may not exist yet (or
+    have any existing ancestor beyond some point) WITHOUT relying on
+    ``os.path.realpath``'s behavior for fully-nonexistent multi-level
+    paths, which is not consistent enough to compare against a
+    similarly-nonexistent root -- comparing two independently-realpath'd
+    nonexistent paths could spuriously say a genuinely-contained path
+    escapes (or, worse, the reverse).
+
+    Walks up to the nearest ancestor that DOES exist, canonicalizes only
+    that real, existing portion (still following any real symlink/
+    junction in it -- this is exactly as security-sensitive as before),
+    then re-appends the nonexistent trailing components VERBATIM
+    (normalized, never resolved -- a component that doesn't exist cannot
+    itself be a symlink/junction, so there is nothing to resolve).
+    """
+    p = Path(path)
+    tail: list[str] = []
+    cur = p
+    while not cur.exists():
+        parent = cur.parent
+        if parent == cur:  # reached a filesystem root that still doesn't exist
+            break
+        tail.append(cur.name)
+        cur = parent
+    resolved = resolve_canonical(cur)
+    for name in reversed(tail):
+        resolved = resolved / name
+    return resolved
 
 
 def normalize_path_key(path: str | Path) -> str:
@@ -37,12 +99,16 @@ def normalize_path_key(path: str | Path) -> str:
 def validate_contained(target: str | Path, base: str | Path) -> Path:
     """Validate that ``target`` resolves to a path inside ``base``.
 
-    Both paths are canonicalised (symlinks/junctions resolved) before
-    comparison. Raises ``PathEscapeError`` if the target escapes. Returns
-    the canonical target path on success.
+    Both paths are canonicalised via the nearest EXISTING ancestor
+    (Round 4 / NEW-08: symlinks/junctions in the existing portion are
+    still resolved; a nonexistent trailing tail is preserved verbatim
+    rather than fed to ``os.path.realpath``, whose behavior for a fully
+    nonexistent multi-level path is not consistent enough to compare
+    against an equally nonexistent base). Raises ``PathEscapeError`` if
+    the target escapes. Returns the canonical target path on success.
     """
-    base_canonical = resolve_canonical(base)
-    target_canonical = resolve_canonical(target)
+    base_canonical = resolve_via_nearest_existing_ancestor(base)
+    target_canonical = resolve_via_nearest_existing_ancestor(target)
 
     base_cmp = normalize_path_key(base_canonical)
     tgt_cmp = normalize_path_key(target_canonical)
@@ -59,30 +125,12 @@ def validate_contained(target: str | Path, base: str | Path) -> Path:
 
 
 def assert_path_family_contained(*targets: str | Path, trusted_root: str | Path) -> None:
-    """Validate every target (and deepest existing ancestor) stays in root."""
-    root = resolve_canonical(trusted_root)
+    """Validate every target stays in root, root and target both resolved
+    via the nearest-existing-ancestor rule (see ``validate_contained``)."""
+    root = resolve_via_nearest_existing_ancestor(trusted_root)
     for target in targets:
-        t = Path(target)
-        cur = t
-        while True:
-            if cur.exists():
-                validate_contained(cur, root)
-                break
-            if cur.parent == cur:
-                break
-            cur = cur.parent
-
-        resolved = resolve_canonical(t)
+        resolved = resolve_via_nearest_existing_ancestor(target)
         validate_contained(resolved, root)
-
-        base_cmp = normalize_path_key(root)
-        tgt_cmp = normalize_path_key(resolved)
-        try:
-            Path(tgt_cmp).relative_to(Path(base_cmp))
-        except ValueError as exc:
-            raise PathEscapeError(
-                f"Path '{target}' resolves to '{resolved}' outside '{root}'."
-            ) from exc
 
 
 def safe_join(base: str | Path, *parts: str) -> Path:

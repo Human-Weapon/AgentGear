@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "HERMES OSS", email = "oss@hermes.local" },
+    { name = "Human-Weapon" },
 ]
 keywords = ["ai", "agents", "orchestration", "routing", "watchdog", "llm", "reliability"]
 classifiers = [
@@ -38,8 +38,8 @@ dev = [
 agentgear = "agentgear.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/hermes-oss/agentgear"
-Issues = "https://github.com/hermes-oss/agentgear/issues"
+Homepage = "https://github.com/Human-Weapon/AgentGear"
+Issues = "https://github.com/Human-Weapon/AgentGear/issues"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

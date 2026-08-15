@@ -26,6 +26,8 @@ _LOCK_TIMEOUT_S = 10.0
 _LOCK_POLL_S = 0.05
 _REPLACE_RETRY_ATTEMPTS = 20
 _REPLACE_RETRY_DELAY_S = 0.02
+_READ_RETRY_ATTEMPTS = 20
+_READ_RETRY_DELAY_S = 0.02
 
 
 def _replace_with_retry(src: Path, dst: Path) -> None:
@@ -187,11 +189,39 @@ class SafeJsonStore:
             return self._default()
         if self.trusted_root is not None:
             self.assert_contained(self.path)
+        raw_text = self._read_text_with_retry()
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(raw_text)
             return self._validator(data) if self._validator is not None else data
-        except (json.JSONDecodeError, ValueError, OSError) as exc:
+        except (json.JSONDecodeError, ValueError) as exc:
             return self._quarantine_and_raise(exc)
+
+    def _read_text_with_retry(self) -> str:
+        """Round 4 / NEW-06 concurrency fix: an UNLOCKED reader racing
+        against another process's locked ``write_atomic`` (temp-file write
+        + atomic replace) can transiently see ``PermissionError`` on
+        Windows while the replace is in flight — this is NOT evidence the
+        file's contents are corrupt, it is a benign, self-resolving race
+        with a concurrent rename. (Exposed by the segmented checkpoint
+        design's ``append()``, whose target-segment peek reads
+        unlocked while other processes may be mid-``update()`` on the
+        very same segment file — no prior code path did an unlocked read
+        this frequently interleaved with concurrent writes.) Retry
+        briefly before giving up; a still-failing read after retries
+        propagates to ``_quarantine_and_raise`` unchanged, so a genuinely
+        unreadable/corrupt file is still caught, just not a transiently
+        busy one.
+        """
+        last_exc: OSError | None = None
+        for attempt in range(_READ_RETRY_ATTEMPTS):
+            try:
+                return self.path.read_text(encoding="utf-8")
+            except OSError as exc:
+                last_exc = exc
+                if attempt < _READ_RETRY_ATTEMPTS - 1:
+                    time.sleep(_READ_RETRY_DELAY_S)
+        assert last_exc is not None
+        return self._quarantine_and_raise(last_exc)
 
     def _quarantine_and_raise(self, exc: BaseException) -> Any:
         quarantined = self.path.with_suffix(self.path.suffix + ".corrupt")

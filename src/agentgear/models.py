@@ -125,6 +125,35 @@ def _validate_unit_interval(name: str, value: float) -> float:
     return float(value)
 
 
+def _validate_factors_mapping(name: str, value: object) -> dict[str, float]:
+    """Round 4 / NEW-01: shared contract for ``ComplexityAssessment.factors``/
+    ``RiskAssessment.factors``. These are NOT diagnostic-only (Round 3 /
+    AUDIT3-04) -- ``routing.py``/``planning.py`` read specific keys
+    (``security_impact``, ``data_impact``, ``irreversibility``,
+    ``ambiguity``, ``architectural_impact``, ``prior_failures``, ...)
+    directly to make real staffing/tier/reasoning decisions. A ``NaN``
+    factor value would silently defeat every ``signal >= threshold``
+    critical-risk check (``NaN >= threshold`` is always ``False``),
+    routing an unknown/maximal-risk signal as if it were harmless. Every
+    admitted value must therefore be validated -- not just ``score`` --
+    BEFORE the mapping is frozen.
+
+    Unknown keys (beyond the currently-consumed ones) are allowed for
+    forward compatibility -- this deliberately does not hardcode a closed
+    vocabulary of factor names -- but every key's VALUE must still obey
+    the same finite-[0,1]-not-bool contract as every other unit-interval
+    field in this module, and every key must itself be a non-blank string.
+    """
+    if not isinstance(value, Mapping):
+        raise TaskProfileError(f"{name} must be a dict[str, float], got {type(value).__name__}")
+    validated: dict[str, float] = {}
+    for key, factor_value in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise TaskProfileError(f"{name} keys must be non-blank strings, got {key!r}")
+        validated[key] = _validate_unit_interval(f"{name}[{key!r}]", factor_value)
+    return validated
+
+
 def _validate_non_negative_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TaskProfileError(f"{name} must be an int, got {type(value).__name__}")
@@ -266,11 +295,7 @@ class TaskProfile:
 @dataclass(frozen=True)
 class ComplexityAssessment:
     """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
-    M7) since it directly drives routing decisions. Individual values
-    inside ``factors`` are not independently range/finiteness-validated
-    the way ``score`` is (that remains a deliberate, scoped M7 decision) —
-    conventionally each is also in [0, 1] (analysis.py always produces
-    them that way).
+    M7) since it directly drives routing decisions.
 
     Round 3 / AUDIT3-04 (correcting an inaccurate Round 2 note):
     ``factors`` is NOT merely diagnostic. ``planning.py`` reads
@@ -283,6 +308,12 @@ class ComplexityAssessment:
     caller originally passed in, nor mutating ``assessment.factors``
     directly after construction, can change what a later routing/planning
     call sees for THIS SAME assessment object.
+
+    Round 4 / NEW-01: every value inside ``factors`` is now validated with
+    the same finite-[0,1]-not-bool contract as ``score`` itself (see
+    ``_validate_factors_mapping``), closing a routing-integrity gap where
+    a ``NaN`` factor value silently defeated every
+    ``signal >= threshold`` critical-risk check.
     """
 
     score: float
@@ -296,19 +327,16 @@ class ComplexityAssessment:
             raise TaskProfileError(
                 f"level must be a ComplexityLevel, got {type(self.level).__name__}"
             )
-        if not isinstance(self.factors, Mapping):
-            raise TaskProfileError(
-                f"factors must be a dict[str, float], got {type(self.factors).__name__}"
-            )
-        object.__setattr__(self, "factors", MappingProxyType(dict(self.factors)))
+        validated_factors = _validate_factors_mapping("factors", self.factors)
+        object.__setattr__(self, "factors", MappingProxyType(validated_factors))
 
 
 @dataclass(frozen=True)
 class RiskAssessment:
     """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
     M7). See ``ComplexityAssessment`` for why ``factors`` is defensively
-    frozen (Round 3 / AUDIT3-04) despite not being independently
-    range-validated -- it IS a real routing input (``routing.py`` reads
+    frozen (Round 3 / AUDIT3-04) and why every value in it is validated
+    (Round 4 / NEW-01) -- it IS a real routing input (``routing.py`` reads
     ``security_impact``/``data_impact``/``irreversibility`` from it for
     critical-risk overrides), not diagnostic-only."""
 
@@ -321,11 +349,8 @@ class RiskAssessment:
         object.__setattr__(self, "score", _validate_unit_interval("score", self.score))
         if not isinstance(self.level, RiskLevel):
             raise TaskProfileError(f"level must be a RiskLevel, got {type(self.level).__name__}")
-        if not isinstance(self.factors, Mapping):
-            raise TaskProfileError(
-                f"factors must be a dict[str, float], got {type(self.factors).__name__}"
-            )
-        object.__setattr__(self, "factors", MappingProxyType(dict(self.factors)))
+        validated_factors = _validate_factors_mapping("factors", self.factors)
+        object.__setattr__(self, "factors", MappingProxyType(validated_factors))
 
 
 # --------------------------------------------------------------------------
@@ -466,11 +491,37 @@ class Checkpoint:
 
 @dataclass(frozen=True)
 class RecoveryAttempt:
+    """Round 4 / NEW-07: this is public audit data (part of ``RecoveryEpisode.
+    attempts`` and ``BlockedReport``-adjacent history), constructible by
+    callers, so it gets the same boundary validation as the other
+    publicly-constructible models."""
+
     reason: str
     strategy: str
     attempt_number: int
     result: RecoveryResult = RecoveryResult.PENDING
     at_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason", _validate_non_blank_str("reason", self.reason))
+        object.__setattr__(self, "strategy", _validate_non_blank_str("strategy", self.strategy))
+        # Inline rather than _validate_positive_int (which raises
+        # TaskProfileError) -- RecoveryAttempt is a watchdog/observation
+        # model, so every field here raises the same InvalidObservationError
+        # family, consistent with `reason`/`strategy`/`at_seconds` above.
+        if isinstance(self.attempt_number, bool) or not isinstance(self.attempt_number, int):
+            raise InvalidObservationError(
+                f"attempt_number must be an int, got {type(self.attempt_number).__name__}"
+            )
+        if self.attempt_number < 1:
+            raise InvalidObservationError(f"attempt_number must be >= 1, got {self.attempt_number}")
+        if not isinstance(self.result, RecoveryResult):
+            raise InvalidObservationError(
+                f"result must be a RecoveryResult, got {type(self.result).__name__}"
+            )
+        object.__setattr__(
+            self, "at_seconds", _validate_observation_timestamp("at_seconds", self.at_seconds)
+        )
 
 
 class RecoveryEpisodeOutcome(str, Enum):

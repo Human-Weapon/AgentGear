@@ -43,8 +43,35 @@ jobs:
       - name: Run tests
         run: pytest --tb=short -q
 
-      - name: Build wheel
-        run: python -m build --wheel
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Inspect release metadata (Round 4 / NEW-09)
+        run: |
+          python - <<'PY'
+          import glob
+          import tarfile
+          import zipfile
+
+          wheel_path = glob.glob("dist/*.whl")[0]
+          with zipfile.ZipFile(wheel_path) as z:
+              metadata_name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              metadata = z.read(metadata_name).decode("utf-8")
+
+          assert "Human-Weapon/AgentGear" in metadata, "wheel METADATA missing the real repo URL"
+          assert "hermes-oss/agentgear" not in metadata.lower(), (
+              "wheel METADATA still references the dead hermes-oss/agentgear repo"
+          )
+          assert "@hermes.local" not in metadata, "wheel METADATA still has the fake .local email"
+
+          sdist_path = glob.glob("dist/*.tar.gz")[0]
+          with tarfile.open(sdist_path) as t:
+              names = t.getnames()
+          for required in ("README.md", "LICENSE", "SECURITY.md", "CHANGELOG.md", "CONTRIBUTING.md"):
+              assert any(n.endswith(required) for n in names), f"sdist is missing {required}"
+
+          print("Release metadata OK: wheel METADATA and sdist contents verified")
+          PY
 
       - name: Clean wheel-only install (black-box)
         run: |

@@ -2,7 +2,9 @@
 
 ## Reporting a vulnerability
 
-If you discover a security issue, **please do not open a public issue**. Email the maintainers instead (address TBD once the repo is published) with:
+If you discover a security issue, **please do not open a public issue**. Use
+[GitHub's private vulnerability reporting](https://github.com/Human-Weapon/AgentGear/security/advisories/new)
+for this repository (Security tab → "Report a vulnerability") instead, with:
 
 - A description of the issue
 - Steps to reproduce

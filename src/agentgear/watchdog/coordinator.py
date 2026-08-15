@@ -33,6 +33,7 @@ from ..config import Policy
 from ..escalation import EscalationDecision, EscalationSignals, decide_escalation
 from ..exceptions import (
     BudgetExceededError,
+    ConfigurationError,
     InvalidObservationError,
     InvalidStateTransitionError,
     RecoveryExhaustedError,
@@ -51,6 +52,7 @@ from ..models import (
     RecoveryEpisodeOutcome,
     RecoveryResult,
 )
+from ..path_security import validate_persistence_safe_id
 from ..routing import estimate_cost
 from .blocked import build_blocked_report
 from .heartbeat import HeartbeatWriter, build_heartbeat
@@ -103,6 +105,29 @@ class ExecutionWatchdog:
     IS safe for concurrent/multiprocess writers independently of this,
     since each write is a separate atomic file operation; see their own
     docstrings.
+
+    Round 4 / NEW-04 -- heartbeat durability contract ("commit + dirty/
+    sync"): the in-memory state machine is ALWAYS the sole authority for
+    "what state is this execution in" -- it is never rolled back because a
+    heartbeat write failed. The on-disk heartbeat file (when ``state_dir``
+    is given) is a best-effort DURABLE MIRROR of that in-memory state, not
+    a second source of truth. If a heartbeat write fails (disk full,
+    permission error, ...), the method you called (``complete()``,
+    ``start()``, ...) still re-raises that error so you learn about it
+    immediately -- but the domain transition it performed has ALREADY
+    happened and is not undone; do not call that method again to "retry"
+    it (most transitions, like reaching COMPLETED, cannot legally be
+    repeated anyway). Instead: check ``status()["heartbeat_dirty"]`` (or
+    the ``heartbeat_dirty`` property), and call ``sync_heartbeat()`` to
+    idempotently retry writing the CURRENT state -- it never repeats a
+    state transition, budget charge, history entry, or attempt count, and
+    is safe to call any number of times, including when nothing is dirty.
+    An external reader of the heartbeat file alone (e.g. the CLI ``status``
+    command, running as a separate process) cannot distinguish "this
+    execution is idle at this state" from "this execution has since moved
+    on but the last write failed" -- only the in-process caller holding
+    this ``ExecutionWatchdog`` instance can see ``heartbeat_dirty`` and
+    resolve it.
     """
 
     def __init__(
@@ -115,9 +140,54 @@ class ExecutionWatchdog:
         context_budget_tokens: int = 2000,
         state_dir: str | None = None,
     ) -> None:
+        # Round 4 / NEW-02: every constructor argument is validated BEFORE
+        # any state is assigned. Previously only execution_id and a loose
+        # `context_budget_tokens <= 0` check ran here -- `bool` (a subclass
+        # of `int`) and `float('nan')` both silently pass `<= 0` (`True<=0`
+        # is `False`; `nan <= 0` is `False`), and passing a raw string for
+        # `initial_tier`/`initial_reasoning` or a non-``Policy`` object for
+        # `policy` was accepted at this point and only surfaced as a raw,
+        # non-domain `AttributeError` moments later inside `__init__`
+        # itself. One error family (`ConfigurationError`) for every
+        # constructor-time problem, consistent with how `Policy` and its
+        # nested config classes already validate themselves.
         _require_non_blank("execution_id", execution_id)
+        if not isinstance(policy, Policy):
+            raise ConfigurationError(
+                f"policy must be a Policy instance, got {type(policy).__name__}"
+            )
+        if not isinstance(initial_tier, ModelTier):
+            raise ConfigurationError(
+                f"initial_tier must be a ModelTier, got {type(initial_tier).__name__}"
+            )
+        if not isinstance(initial_reasoning, ReasoningEffort):
+            raise ConfigurationError(
+                "initial_reasoning must be a ReasoningEffort, got "
+                f"{type(initial_reasoning).__name__}"
+            )
+        if isinstance(context_budget_tokens, bool) or not isinstance(context_budget_tokens, int):
+            raise ConfigurationError(
+                f"context_budget_tokens must be an int, got {type(context_budget_tokens).__name__}"
+            )
         if context_budget_tokens <= 0:
-            raise InvalidObservationError("context_budget_tokens must be > 0")
+            raise ConfigurationError(
+                f"context_budget_tokens must be > 0, got {context_budget_tokens}"
+            )
+        if state_dir is not None and not isinstance(state_dir, str):
+            raise ConfigurationError(
+                f"state_dir must be a str or None, got {type(state_dir).__name__}"
+            )
+        # Self-adversarial pass (section 33): a state_dir-backed watchdog
+        # previously only discovered a filesystem-unsafe execution_id (see
+        # NEW-08's InvalidIdentifierError) on its first start(), by which
+        # point the state machine had already transitioned to RUNNING and
+        # budget had been committed -- an irreversible domain mutation
+        # (NEW-04's "commit is authoritative, never rolled back" model)
+        # left permanently stuck with a heartbeat that can never sync,
+        # since this failure is NOT transient like a full disk. Reject it
+        # atomically here instead, before any state exists to get stuck.
+        if state_dir is not None:
+            validate_persistence_safe_id("execution_id", execution_id)
 
         self.execution_id = execution_id
         self.policy = policy
@@ -160,6 +230,18 @@ class ExecutionWatchdog:
         self._planned_initial_cost: float | None = None
 
         self._heartbeat_writer = HeartbeatWriter(state_dir) if state_dir else None
+        # Round 4 / NEW-04: durability model is "commit + dirty/sync" (see
+        # ExecutionWatchdog's own docstring and
+        # docs/audits/remediation-round-4.md). The in-memory state machine
+        # is ALWAYS authoritative and is never rolled back for a
+        # persistence failure. If a heartbeat write fails, we mark the
+        # heartbeat dirty and re-raise the original error so the immediate
+        # caller learns about it -- but the already-committed domain
+        # transition stands, and the caller recovers durable status via
+        # sync_heartbeat(), never by repeating the domain operation.
+        self._heartbeat_dirty = False
+        self._heartbeat_sync_error: str | None = None
+        self._last_heartbeat_at_seconds: float | None = None
         self._checkpoint_store = None
         if state_dir:
             from ..checkpoints import CheckpointStore
@@ -198,18 +280,44 @@ class ExecutionWatchdog:
     # -- internal helpers ----------------------------------------------
 
     def _validate_time(self, at_seconds: float) -> float:
+        """Round 4 / NEW-03: PURE check -- validates ``at_seconds`` is
+        finite/non-negative and not before the last COMMITTED observation,
+        but never mutates the clock itself. A caller that goes on to fail
+        its OWN validation after this check (e.g. ``complete()`` rejecting
+        malformed evidence) must not have already advanced
+        ``_last_observed_at``, or a subsequent legitimate retry at an
+        earlier, more reasonable timestamp would be incorrectly rejected
+        as "before the last observed time" even though the operation that
+        supposedly observed that later time never actually succeeded. See
+        ``_commit_time``, which every public method calls explicitly, only
+        once its own operation has fully succeeded.
+        """
         at_seconds = _validate_finite_non_negative("at_seconds", at_seconds)
         if self._last_observed_at is not None and at_seconds < self._last_observed_at:
             raise InvalidObservationError(
                 f"at_seconds={at_seconds} is before the last observed time "
                 f"{self._last_observed_at}; the watchdog requires non-decreasing timestamps"
             )
-        self._last_observed_at = at_seconds
         return at_seconds
 
+    def _commit_time(self, at_seconds: float) -> None:
+        """Advances the clock watermark. Must only be called once the
+        calling method's operation has fully succeeded -- never on a path
+        that is about to raise."""
+        self._last_observed_at = at_seconds
+
     def _write_heartbeat(self, at_seconds: float) -> None:
+        """Best-effort durable mirror of the in-memory state, called AFTER
+        the domain operation (state transition, clock commit, ...) has
+        already fully succeeded (Round 4 / NEW-04). A failure here marks
+        the heartbeat dirty and re-raises the original exception unchanged
+        -- the caller learns persistence failed, but the domain operation
+        that already completed is never rolled back or repeated. See
+        ``sync_heartbeat()`` for the idempotent recovery path.
+        """
         if self._heartbeat_writer is None:
             return
+        self._last_heartbeat_at_seconds = at_seconds
         heartbeat = build_heartbeat(
             execution_id=self.execution_id,
             state=self._sm.state,
@@ -224,7 +332,43 @@ class ExecutionWatchdog:
             last_error=self._last_error,
             pending_work=self._checkpoints[-1].pending if self._checkpoints else (),
         )
-        self._heartbeat_writer.write(heartbeat)
+        try:
+            self._heartbeat_writer.write(heartbeat)
+        except Exception as exc:
+            self._heartbeat_dirty = True
+            self._heartbeat_sync_error = str(exc)
+            raise
+        self._heartbeat_dirty = False
+        self._heartbeat_sync_error = None
+
+    @property
+    def heartbeat_dirty(self) -> bool:
+        """True if the last attempted heartbeat write failed and the
+        durable heartbeat file may be stale relative to in-memory state.
+        The in-memory state itself is never affected by this -- only the
+        external, best-effort mirror of it. Call ``sync_heartbeat()`` to
+        retry."""
+        return self._heartbeat_dirty
+
+    def sync_heartbeat(self) -> bool:
+        """Idempotently retries writing the CURRENT in-memory state as a
+        heartbeat, without repeating any domain transition, budget charge,
+        history entry, or attempt count -- purely a durability catch-up.
+        Returns True if the heartbeat is (now) synchronized, False if the
+        retry itself failed again (check ``heartbeat_dirty``/status() for
+        the latest error). Safe to call any number of times, including
+        when nothing is dirty (a no-op returning True).
+        """
+        if not self._heartbeat_dirty:
+            return True
+        if self._heartbeat_writer is None or self._last_heartbeat_at_seconds is None:
+            self._heartbeat_dirty = False
+            return True
+        try:
+            self._write_heartbeat(self._last_heartbeat_at_seconds)
+        except Exception:
+            return False
+        return True
 
     def _transition_to_blocked(
         self,
@@ -256,6 +400,11 @@ class ExecutionWatchdog:
         self._close_recovery_episode(outcome=RecoveryEpisodeOutcome.BLOCKED, at_seconds=at_seconds)
         self._sm.transition(ExecutionState.BLOCKED, at_seconds=at_seconds, note=blocker)
         self._last_error = blocker
+        # Round 4 / NEW-04: commit the clock/state BEFORE the best-effort
+        # heartbeat mirror, so a heartbeat write failure (which re-raises,
+        # see _write_heartbeat) never blocks the already-decided BLOCKED
+        # transition from being fully committed in memory.
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
         return report
 
@@ -327,6 +476,7 @@ class ExecutionWatchdog:
         self._started_at = at_seconds
         self._current_task = task
         self._sm.transition(ExecutionState.RUNNING, at_seconds=at_seconds, note=f"started: {task}")
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
 
     def advance(self, target: ExecutionState, *, at_seconds: float, note: str = "") -> None:
@@ -347,6 +497,7 @@ class ExecutionWatchdog:
             )
         at_seconds = self._validate_time(at_seconds)
         self._sm.transition(target, at_seconds=at_seconds, note=note)
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
 
     def record_activity(
@@ -382,6 +533,7 @@ class ExecutionWatchdog:
         self._loop_guard.record_identical_failure(is_repeat=is_repeat)
         if error:
             self._last_error = error
+        self._commit_time(at_seconds)
 
         self.evaluate(at_seconds=at_seconds)
 
@@ -401,6 +553,7 @@ class ExecutionWatchdog:
         self._progress.record(event)
         self._loop_guard.record_progress()
         self._last_progress_evidence = description
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
 
     def evaluate(self, *, at_seconds: float) -> None:
@@ -411,6 +564,7 @@ class ExecutionWatchdog:
         """
         at_seconds = self._validate_time(at_seconds)
         if self._sm.state not in _ACTIVE_STATES or self._started_at is None:
+            self._commit_time(at_seconds)
             return
 
         verdict = self._stall_detector.evaluate(
@@ -420,6 +574,7 @@ class ExecutionWatchdog:
             recent_activities=self._activities,
         )
         if not verdict.is_stalled:
+            self._commit_time(at_seconds)
             return
 
         reasons = "; ".join(verdict.reasons)
@@ -432,6 +587,7 @@ class ExecutionWatchdog:
         # through record_recovery_result()'s FAILURE branch, which routes
         # RECOVERING -> STALLED directly and does NOT open a new episode.
         self._open_new_recovery_episode(at_seconds=at_seconds, stall_reason=reasons)
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
         self.begin_recovery(at_seconds=at_seconds, reason="stall_detected")
 
@@ -529,6 +685,7 @@ class ExecutionWatchdog:
         self._sm.transition(
             ExecutionState.RECOVERING, at_seconds=at_seconds, note=f"recovering via {strategy}"
         )
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
         return attempt
 
@@ -614,6 +771,7 @@ class ExecutionWatchdog:
             )
             self._last_progress_evidence = progress_description
             self._loop_guard.record_progress()
+            self._commit_time(at_seconds)
             self._write_heartbeat(at_seconds)
             return
 
@@ -632,6 +790,7 @@ class ExecutionWatchdog:
                 at_seconds=at_seconds,
                 note=evidence or f"recovery via {last.strategy} failed",
             )
+            self._commit_time(at_seconds)
             self._write_heartbeat(at_seconds)
 
     def record_escalation(
@@ -664,6 +823,7 @@ class ExecutionWatchdog:
             self.reasoning = decision.next_reasoning
             self.escalations_used += 1
             self._loop_guard.record_escalation()
+        self._commit_time(at_seconds)
         return decision
 
     def checkpoint(
@@ -685,14 +845,23 @@ class ExecutionWatchdog:
             last_good_state=last_good_state,
             at_seconds=at_seconds,
         )
-        self._checkpoints.append(cp)
+        # Round 4 / section 15 (validate-before-mutate sweep): persist
+        # FIRST, then mirror into the in-memory cache -- if the durable
+        # append fails (disk full, quarantine, ...), self._checkpoints
+        # must not already claim a checkpoint exists that was never
+        # actually written, since _transition_to_blocked() reads
+        # self._checkpoints[-1] as the BlockedReport's "last successful
+        # checkpoint" and _write_heartbeat() reads it for pending_work.
         if self._checkpoint_store is not None:
             self._checkpoint_store.append(cp)
+        self._checkpoints.append(cp)
+        self._commit_time(at_seconds)
         return cp
 
     def complete(self, *, at_seconds: float, evidence: tuple[str, ...]) -> None:
         at_seconds = self._validate_time(at_seconds)
         self._sm.transition(ExecutionState.COMPLETED, at_seconds=at_seconds, evidence=evidence)
+        self._commit_time(at_seconds)
         self._write_heartbeat(at_seconds)
 
     @property
@@ -742,4 +911,11 @@ class ExecutionWatchdog:
             "budget": self.budget.status(),
             "blocked_report": self._blocked_report,
             "latest_checkpoint": self._checkpoints[-1] if self._checkpoints else None,
+            # Round 4 / NEW-04: durability status. `heartbeat_dirty=True`
+            # means the durable heartbeat file may be stale relative to
+            # this in-memory state (the last write attempt failed) -- the
+            # in-memory state above is unaffected either way. Call
+            # sync_heartbeat() to retry.
+            "heartbeat_dirty": self._heartbeat_dirty,
+            "heartbeat_sync_error": self._heartbeat_sync_error,
         }

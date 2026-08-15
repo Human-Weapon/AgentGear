@@ -225,3 +225,212 @@ def test_search_limit_must_be_positive() -> None:
 def test_search_limit_must_be_an_int() -> None:
     with pytest.raises(ConfigurationError):
         PromptGraphContextProvider(search_limit=1.5)  # type: ignore[arg-type]
+
+
+# --- Round 4 / NEW-05: iterable/generator adapter safety --------------------
+
+
+def _available_provider(monkeypatch, memory, **kwargs) -> PromptGraphContextProvider:
+    class FakeInstance:
+        pass
+
+    instance = FakeInstance()
+    instance.memory = memory
+    monkeypatch.setattr(
+        "agentgear.context_provider.PromptGraphContextProvider.is_available",
+        staticmethod(lambda: True),
+    )
+    return PromptGraphContextProvider(promptgraph_instance=instance, **kwargs)
+
+
+def test_search_returning_a_list_still_works(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return [{"content": "a"}, {"content": "b"}]
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "promptgraph"
+    assert "a" in package.content and "b" in package.content
+
+
+def test_search_returning_a_tuple_still_works(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return ({"content": "a"}, {"content": "b"})
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "promptgraph"
+
+
+def test_search_returning_a_generator_does_not_crash_on_len(monkeypatch) -> None:
+    """The exact NEW-05 regression: the old code called len(results or [])
+    for the note string, which raises TypeError on a generator."""
+
+    class Memory:
+        def search(self, query, limit=10):
+            yield {"content": "a"}
+            yield {"content": "b"}
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "promptgraph"
+    assert "a" in package.content and "b" in package.content
+
+
+def test_effectively_infinite_generator_is_bounded_by_search_limit(monkeypatch) -> None:
+    """An infinite generator of empty-content entries never trips the
+    budget-based break, so consumption must be independently bounded by
+    search_limit or this would hang forever."""
+
+    class Memory:
+        def search(self, query, limit=10):
+            i = 0
+            while True:
+                i += 1
+                yield {"content": ""}
+
+    provider = _available_provider(monkeypatch, Memory(), search_limit=5)
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "promptgraph"
+    assert package.content == ""
+    assert "0 of 5 considered" in package.note
+
+
+def test_generator_exception_before_first_yield_falls_back_safely(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            raise RuntimeError("cannot even start")
+            yield {"content": "unreachable"}  # noqa: F401,E501 (unreachable, marks this a generator)
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "default"
+    assert "failed" in package.note
+
+
+def test_generator_exception_after_one_yield_falls_back_safely(monkeypatch) -> None:
+    """The exact NEW-05 regression: an exception raised DURING iteration
+    (not from the initial search() call) used to escape uncaught."""
+
+    class Memory:
+        def search(self, query, limit=10):
+            yield {"content": "first"}
+            raise RuntimeError("boom mid-iteration")
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "default"
+    assert "failed" in package.note
+    assert "boom mid-iteration" in package.note
+
+
+@pytest.mark.parametrize(
+    "malformed_item",
+    [
+        None,
+        42,
+        "a bare string",
+        {"no_content_key": "x"},
+    ],
+)
+def test_malformed_items_do_not_crash(monkeypatch, malformed_item) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return [malformed_item]
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    # Either coerced via str()/`.get(..., "")` and included, or (for an
+    # item whose own conversion raises) safely falls back -- either way,
+    # this must never raise out of request().
+    assert package.source in ("promptgraph", "default")
+
+
+def test_item_with_broken_str_falls_back_safely(monkeypatch) -> None:
+    class Broken:
+        def __str__(self):
+            raise RuntimeError("broken __str__")
+
+    class Memory:
+        def search(self, query, limit=10):
+            return [Broken()]
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "default"
+    assert "failed" in package.note
+
+
+def test_none_return_value_does_not_crash(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return None
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "default"
+
+
+def test_wrong_return_type_does_not_crash(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return 42  # not iterable at all
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "default"
+    assert "failed" in package.note
+
+
+def test_unicode_content_is_handled(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return [{"content": "héllo wörld 你好 🎉"}]
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
+    assert package.source == "promptgraph"
+    assert "你好" in package.content
+
+
+def test_budget_of_one_token_does_not_crash(monkeypatch) -> None:
+    class Memory:
+        def search(self, query, limit=10):
+            return [{"content": "some real content here"}]
+
+    provider = _available_provider(monkeypatch, Memory())
+    package = provider.request(ContextRequest(topic="x", budget_tokens=1))
+    assert package.used_tokens <= 1
+
+
+def test_search_limit_of_one_bounds_consumption(monkeypatch) -> None:
+    seen = []
+
+    class Memory:
+        def search(self, query, limit=10):
+            for i in range(100):
+                seen.append(i)
+                yield {"content": f"chunk-{i}"}
+
+    provider = _available_provider(monkeypatch, Memory(), search_limit=1)
+    provider.request(ContextRequest(topic="x", budget_tokens=10_000))
+    assert len(seen) == 1
+
+
+def test_final_rendered_content_never_exceeds_budget_across_failure_modes(monkeypatch) -> None:
+    """AG-08's budget invariant must hold on every path: normal, fallback,
+    and generator-failure."""
+
+    def _raises(self, q, limit=10):
+        raise RuntimeError("boom")
+
+    memories = [
+        type("M", (), {"search": lambda self, q, limit=10: [{"content": "x" * 5000}]})(),
+        type("M", (), {"search": _raises})(),
+    ]
+    for memory in memories:
+        provider = _available_provider(monkeypatch, memory)
+        package = provider.request(ContextRequest(topic="x", budget_tokens=50))
+        assert package.used_tokens <= 50

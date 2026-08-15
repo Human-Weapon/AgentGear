@@ -1,0 +1,8 @@
+# Round 4 / NEW-09: setuptools only auto-includes README.md and LICENSE in
+# the sdist; every other top-level doc README.md itself links to (and the
+# audit docs CHANGELOG.md references) must be listed explicitly or they
+# silently vanish from `python -m build`'s sdist output.
+include SECURITY.md
+include CONTRIBUTING.md
+include CHANGELOG.md
+recursive-include docs *.md

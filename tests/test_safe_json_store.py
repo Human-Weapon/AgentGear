@@ -122,3 +122,67 @@ def test_write_atomic_gives_up_after_exhausting_replace_retries(tmp_path, monkey
 
     with pytest.raises(PermissionError):
         store.write_atomic({"a": 1})
+
+
+def test_read_retries_transient_permission_error_instead_of_quarantining(
+    tmp_path, monkeypatch
+) -> None:
+    """Round 4 / NEW-06 concurrency fix: discovered via real multiprocess
+    testing of the segmented checkpoint design, whose append() does an
+    UNLOCKED peek read that can race with another process's locked
+    write_atomic (temp-write + atomic replace) on the SAME file. On
+    Windows this transiently raises PermissionError while the replace is
+    in flight -- NOT evidence of corruption. The old code treated ANY
+    OSError from read_text() as corruption and quarantined a perfectly
+    healthy file. The first N transient read failures must be retried
+    transparently instead of destroying the file."""
+    import pathlib
+
+    from agentgear import safe_json_store as sjs_module
+
+    path = tmp_path / "data.json"
+    store = SafeJsonStore(path, default=dict)
+    store.write_atomic({"a": 1})
+
+    calls = {"count": 0}
+    real_read_text = pathlib.Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] <= 3:
+            raise PermissionError("simulated transient WinError 32")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", flaky_read_text)
+    monkeypatch.setattr(sjs_module, "_READ_RETRY_DELAY_S", 0.0)
+
+    result = store.read()
+    assert result == {"a": 1}
+    assert calls["count"] == 4
+    monkeypatch.undo()
+    # the file was never quarantined/renamed away by the transient errors
+    assert path.exists()
+    assert store.read() == {"a": 1}
+
+
+def test_read_gives_up_after_exhausting_retries_and_quarantines(tmp_path, monkeypatch) -> None:
+    """A PERSISTENT (not transient) read failure must still be treated as
+    corruption and quarantined -- the retry must not mask a genuine,
+    permanently unreadable file."""
+    import pathlib
+
+    from agentgear import safe_json_store as sjs_module
+    from agentgear.exceptions import CorruptStorageError
+
+    path = tmp_path / "data.json"
+    store = SafeJsonStore(path, default=dict)
+    store.write_atomic({"a": 1})
+
+    def always_denied(self, *args, **kwargs):
+        raise PermissionError("simulated persistent denial")
+
+    monkeypatch.setattr(pathlib.Path, "read_text", always_denied)
+    monkeypatch.setattr(sjs_module, "_READ_RETRY_DELAY_S", 0.0)
+
+    with pytest.raises(CorruptStorageError):
+        store.read()

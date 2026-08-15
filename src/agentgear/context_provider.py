@@ -25,6 +25,7 @@ AG-08 provenance contract:
 
 from __future__ import annotations
 
+import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -164,27 +165,40 @@ class PromptGraphContextProvider(ContextProvider):
                 }
             )
 
+        # Round 4 / NEW-05: the ENTIRE operation -- calling search(), lazily
+        # iterating whatever it returns, and converting/measuring each item
+        # -- happens inside one safety boundary. `search()` may legitimately
+        # return a generator (no `len()`, and any exception it raises can
+        # be deferred to iteration time rather than the call itself), and a
+        # buggy or malicious adapter might ignore `limit` and hand back an
+        # effectively infinite iterable. Consumption is independently
+        # bounded via `itertools.islice` (never trust the far side to
+        # honor `limit`, never materialize an arbitrary iterable with
+        # `list(results)`), and a failure at ANY phase -- the call itself,
+        # a mid-iteration exception, or a malformed item's own `str()` --
+        # degrades to the exact same safe fallback.
+        chunks: list[str] = []
+        considered = 0
         try:
             results = search(request.topic, limit=self._search_limit)
+            for entry in itertools.islice(results, self._search_limit):
+                considered += 1
+                content = str(entry.get("content", "")) if isinstance(entry, dict) else str(entry)
+                if not content:
+                    continue
+                # Check the token count of the ACTUAL joined result (chunk
+                # separators included) before committing to a chunk — never
+                # the chunk's isolated token count, which understates the
+                # real cost once chunks are joined (AG-08).
+                candidate = "\n\n".join([*chunks, content])
+                if _approx_token_count(candidate) > request.budget_tokens:
+                    break
+                chunks.append(content)
         except Exception as exc:  # noqa: BLE001 - optional integration must never crash callers
             package = self._fallback.request(request)
             return ContextPackage(
                 **{**package.__dict__, "note": f"promptgraph.memory.search() failed: {exc}"}
             )
-
-        chunks: list[str] = []
-        for entry in results or []:
-            content = str(entry.get("content", "")) if isinstance(entry, dict) else str(entry)
-            if not content:
-                continue
-            # Check the token count of the ACTUAL joined result (chunk
-            # separators included) before committing to a chunk — never
-            # the chunk's isolated token count, which understates the
-            # real cost once chunks are joined (AG-08).
-            candidate = "\n\n".join([*chunks, content])
-            if _approx_token_count(candidate) > request.budget_tokens:
-                break
-            chunks.append(content)
 
         combined = "\n\n".join(chunks)
         return ContextPackage(
@@ -195,7 +209,7 @@ class PromptGraphContextProvider(ContextProvider):
             source="promptgraph",
             constraints_requested=request.constraints,
             constraints_applied=(),
-            note=f"{len(chunks)} of {len(results or [])} matching memory entries fit the budget",
+            note=f"{len(chunks)} of {considered} considered memory entries fit the budget",
         )
 
 

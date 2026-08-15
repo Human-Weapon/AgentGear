@@ -88,3 +88,14 @@ class CorruptStorageError(PersistenceError):
 
 class PathEscapeError(PersistenceError):
     """Raised when a resolved path escapes the allowed base directory."""
+
+
+class InvalidIdentifierError(PersistenceError):
+    """Raised when an identifier (e.g. ``execution_id``) that becomes a
+    literal filename/directory-name component is permanently unsafe for
+    that purpose (too long, contains characters illegal in a filename) --
+    Round 4 / NEW-08. Distinct from ``PathEscapeError`` (a traversal/
+    containment attempt): this is "this identifier can never work on this
+    filesystem," caught immediately rather than surfacing 10+ seconds
+    later as a confusing ``StorageLockError`` once the underlying OS call
+    finally fails."""

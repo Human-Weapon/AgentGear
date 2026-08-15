@@ -2,6 +2,78 @@
 
 All notable changes to AgentGear are documented in this file.
 
+## [0.1.0] - Unreleased (release candidate) — Remediation Round 4
+
+Not yet tagged pending independent adversarial audit. Addresses findings from a fourth
+independent adversarial audit (baseline commit `bc53151`). Full writeups:
+`docs/audits/remediation-round-4.md`; cross-round index: `docs/audits/index.md`.
+
+### Changed (user-visible contract changes)
+
+- **`ComplexityAssessment.factors`/`RiskAssessment.factors`** now validate every value
+  (finite, in [0,1], not bool) in addition to being deep-frozen (Round 3). A `NaN`/
+  `Infinity`/out-of-range/bool factor value now raises `TaskProfileError` at construction
+  instead of silently defeating critical-risk routing checks later.
+- **`ExecutionWatchdog.__init__`** now validates `policy` (must be a `Policy`),
+  `initial_tier`/`initial_reasoning` (must be real enum members, no string coercion),
+  `context_budget_tokens` (strict positive `int`, bool excluded), and `state_dir` (str or
+  `None`), all raising `ConfigurationError`. Previously some invalid values were silently
+  accepted (e.g. `context_budget_tokens=True`) and others crashed with a raw
+  `AttributeError` deep inside the constructor.
+- **Rejected coordinator operations no longer advance the internal clock.** Previously, a
+  call that failed its own validation (e.g. `complete()` rejecting malformed evidence)
+  could still have already advanced the "last observed time" watermark, incorrectly
+  causing a subsequent legitimate retry at an earlier timestamp to fail.
+- **New heartbeat durability API:** `ExecutionWatchdog.heartbeat_dirty` (property) and
+  `ExecutionWatchdog.sync_heartbeat()` (method). If a heartbeat write fails, in-memory
+  state is never rolled back (it remains authoritative) and the triggering call still
+  raises so the caller learns about the failure — but `heartbeat_dirty` becomes `True`
+  and `sync_heartbeat()` idempotently retries the write without repeating any domain
+  transition, budget charge, or history entry. `status()` now includes
+  `"heartbeat_dirty"`/`"heartbeat_sync_error"`.
+- **Checkpoint storage format changed** from one ever-growing `{execution_id}.
+  checkpoints.json` file to a segmented `{execution_id}.checkpoints/segment-NNNNNN.json`
+  directory (bounded entries per segment), fixing an O(N²) total-cost growth pattern over
+  an execution's lifetime. `CheckpointStore`'s public API (`append`/`all`/`latest`) is
+  unchanged; only the on-disk layout changed. No migration path is provided (v0.1.0 has
+  not shipped, so the old format was never a released contract).
+- **`RecoveryAttempt`** now validates `reason`/`strategy` (non-blank), `attempt_number`
+  (positive int, bool excluded), `result` (a real `RecoveryResult`), and `at_seconds`
+  (finite, non-negative) at construction, raising `InvalidObservationError`.
+- **`HeartbeatWriter`/`CheckpointStore`** now reject a permanently-unsafe `execution_id`
+  (over 150 characters, or containing characters illegal in a filename) immediately with
+  a new `InvalidIdentifierError`, instead of eventually failing after a ~10-second lock
+  retry loop with a confusing `StorageLockError`.
+- Fixed a real multiprocess race (found via this round's own multi-process
+  verification, at 10 concurrent checkpoint appenders): an unlocked read racing
+  against another process's concurrent atomic file replace could transiently see a
+  `PermissionError` on Windows and get misclassified as file corruption, quarantining
+  a perfectly healthy checkpoint segment. Reads now retry briefly on a transient OS
+  error before concluding corruption; a genuinely unreadable file still quarantines
+  as before.
+- Fixed a path-containment bug where a `state_dir` that doesn't exist yet (even one level
+  deep) caused every heartbeat/checkpoint write to fail with a spurious
+  `PathEscapeError`; reads on a nonexistent `state_dir` now cleanly return "no state
+  found" rather than raising. Traversal/junction/symlink rejection is unaffected.
+- `PromptGraphContextProvider` no longer assumes its adapter's `search()` result supports
+  `len()`, and now catches exceptions raised during iteration (not just from the initial
+  call), so a generator-based or misbehaving adapter degrades to the documented fallback
+  instead of crashing or, for an unbounded generator, hanging.
+- Corrected project metadata: `pyproject.toml`'s `Homepage`/`Issues`/author now point to
+  the real repository (`Human-Weapon/AgentGear`) instead of a placeholder; `SECURITY.md`
+  now points to GitHub's private vulnerability reporting instead of a TBD email; the
+  source distribution (sdist) now includes `SECURITY.md`/`CHANGELOG.md`/
+  `CONTRIBUTING.md`/`docs/**/*.md`, which were previously silently omitted.
+- Self-adversarial pass (beyond the 10 pre-specified findings): `checkpoint()` now
+  persists a checkpoint durably before mirroring it into the in-memory cache, so a
+  persistence failure can no longer leave `self._checkpoints` claiming a checkpoint exists
+  that was never actually written. `ExecutionWatchdog.__init__` now eagerly rejects a
+  filesystem-unsafe `execution_id` when `state_dir` is provided, instead of silently
+  accepting it and only discovering the problem on the first `start()` call — by which
+  point the state machine had already transitioned to `RUNNING` and budget had already
+  been committed, an irreversible mutation left permanently stuck with an unsyncable dirty
+  heartbeat, since a bad identifier (unlike a full disk) is never transient.
+
 ## [0.1.0] - Unreleased (release candidate) — Remediation Round 3
 
 Not yet tagged pending independent adversarial audit. Addresses findings from a third
