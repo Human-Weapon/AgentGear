@@ -89,6 +89,13 @@ class ExecutionBudgetLedger:
     """Tracks cumulative token/cost usage for one execution against hard
     ceilings. Not thread-safe by design — one execution, one ledger,
     one owning coordinator (mirrors ``ExecutionStateMachine``).
+
+    Round 3 / AUDIT3-05: concretely, this means ``reserve()``/``commit()``/
+    ``release()`` must not be called concurrently against the same ledger
+    instance from multiple threads or processes — there is no internal
+    lock, and a caller that needs concurrent access must serialize it
+    externally (the same single-writer contract as the owning
+    ``ExecutionWatchdog``; see its class docstring).
     """
 
     def __init__(self, *, max_tokens: int, max_cost: float) -> None:

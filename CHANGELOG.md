@@ -2,6 +2,43 @@
 
 All notable changes to AgentGear are documented in this file.
 
+## [0.1.0] - Unreleased (release candidate) — Remediation Round 3
+
+Not yet tagged pending independent adversarial audit. Addresses findings from a third
+independent adversarial audit (baseline commit `1cff32b`). Full writeups:
+`docs/audits/remediation-round-3.md`.
+
+### Changed (user-visible contract changes)
+
+- **`ExecutionStateMachine.transition(evidence=...)`** now validates evidence
+  **strictly**: every entry must be a non-blank string, or the *entire* call is rejected
+  (`InvalidObservationError`) before any state mutation. Previously, invalid entries
+  mixed in with valid ones were silently dropped rather than raising — e.g.
+  `evidence=("done", 42)` used to succeed and quietly store only `("done",)`. A
+  well-formed but empty evidence tuple on a `COMPLETED` transition still raises the more
+  specific `NotCompletedError`, as before.
+- **`ExecutionWatchdog.begin_recovery()`** now only converts a `RecoveryExhaustedError`
+  from `RecoveryEngine.next_strategy()` into a `BLOCKED` report. Any other exception type
+  (e.g. a bug in a custom `RecoveryEngine`) now propagates as a real exception instead of
+  being silently reported as ordinary recovery exhaustion.
+- **`Policy.model_tier_mapping`, `ComplexityAssessment.factors`, `RiskAssessment.factors`**
+  are now deep-frozen: the constructor defensively copies the input, and the exposed
+  mapping rejects direct item assignment (`TypeError`). Previously these were plain
+  mutable `dict`s nested inside otherwise-frozen dataclasses, so a caller mutating either
+  the original source dict or the exposed field after construction could silently change
+  routing/planning output for subsequent calls using the same object.
+- **`RecoveryEpisode`** (returned via `ExecutionWatchdog.recovery_history`) now validates
+  its fields on construction (positive `episode_number`, finite timestamps with
+  `closed_at >= opened_at`, a real `RecoveryEpisodeOutcome`, a proper
+  `tuple[RecoveryAttempt, ...]`).
+- `CriticalRiskPolicy`'s documentation corrected: a `*_at` threshold of `0.0` means the
+  critical-risk floor applies **unconditionally** (every signal value, including an
+  exactly-zero one, satisfies `signal >= 0.0`) — not "any nonzero signal," as previously
+  (incorrectly) documented. No behavior changed, only the description of existing
+  behavior.
+- `ExecutionWatchdog`/`ExecutionBudgetLedger` are now explicitly documented as
+  single-writer, not-thread-safe coordinators for v0.1.0 (no behavior change).
+
 ## [0.1.0] - Unreleased (release candidate) — Remediation Round 1
 
 Not yet tagged pending independent adversarial audit. This round addresses the findings

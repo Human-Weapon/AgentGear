@@ -31,7 +31,12 @@ import math
 from ..budget import ExecutionBudgetLedger, ReservationKind
 from ..config import Policy
 from ..escalation import EscalationDecision, EscalationSignals, decide_escalation
-from ..exceptions import BudgetExceededError, InvalidObservationError, InvalidStateTransitionError
+from ..exceptions import (
+    BudgetExceededError,
+    InvalidObservationError,
+    InvalidStateTransitionError,
+    RecoveryExhaustedError,
+)
 from ..models import (
     BlockedReport,
     Checkpoint,
@@ -80,7 +85,25 @@ def _require_non_blank(name: str, value: str) -> str:
 
 
 class ExecutionWatchdog:
-    """Supervises one execution end-to-end. One instance per execution_id."""
+    """Supervises one execution end-to-end. One instance per execution_id.
+
+    Round 3 / AUDIT3-05 -- concurrency contract: ``ExecutionWatchdog`` is a
+    **single-writer coordinator** in v0.1.0. It holds no internal lock, and
+    none of its state-mutating methods (``start``, ``record_activity``,
+    ``record_progress``, ``evaluate``, ``begin_recovery``,
+    ``record_recovery_result``, ``checkpoint``, ``complete``, ...) are
+    safe to call concurrently from multiple threads/processes against the
+    SAME instance. If your integration has multiple agents or workers
+    reporting events for the same execution, serialize their event
+    submission through a single caller-owned queue/lock before it reaches
+    one ``ExecutionWatchdog`` instance -- "multi-agent orchestration" here
+    describes what AgentGear plans and routes for, not a claim that the
+    coordinator object itself tolerates unsynchronized concurrent writers.
+    The persistence layer it uses (``HeartbeatWriter``, ``CheckpointStore``)
+    IS safe for concurrent/multiprocess writers independently of this,
+    since each write is a separate atomic file operation; see their own
+    docstrings.
+    """
 
     def __init__(
         self,
@@ -453,7 +476,18 @@ class ExecutionWatchdog:
             strategy = self._recovery_engine.next_strategy(
                 tried_strategies=self._tried_strategies, attempt_number=attempt_number
             )
-        except Exception as exc:  # RecoveryExhaustedError
+        except RecoveryExhaustedError as exc:
+            # Round 3 / AUDIT3-03: this clause is narrowed to the ONE
+            # documented business exception RecoveryEngine.next_strategy()
+            # can raise. It used to catch `Exception` broadly (with a
+            # comment implying only RecoveryExhaustedError was expected),
+            # which meant a genuine programming bug in a caller-supplied
+            # or buggy RecoveryEngine (AttributeError, TypeError, KeyError,
+            # ...) would be silently reclassified as a normal-looking
+            # BLOCKED business report instead of propagating as the crash
+            # it actually is -- hiding real defects from whoever operates
+            # the execution. Any other exception type now propagates
+            # unchanged, before any state/budget/history mutation below.
             self._sm.transition(ExecutionState.RECOVERING, at_seconds=at_seconds, note=reason)
             self._transition_to_blocked(
                 at_seconds=at_seconds,
@@ -557,10 +591,19 @@ class ExecutionWatchdog:
                 at_seconds=at_seconds,
                 note=progress_description,
             )
-            # A successful recovery is genuine new evidence. Record it as
-            # such so every detector signal uses this point as its fresh
-            # post-progress boundary rather than immediately re-counting
-            # the activity that caused the original stall.
+            # Round 3 / section 13: "recovery SUCCESS" means the recovery
+            # ACTION itself succeeded (execution capability was restored --
+            # e.g. a tool was restarted, an approach was changed) -- it is
+            # NOT a claim that the original task materially advanced. That
+            # distinction still matters here: a successful recovery
+            # establishes a new operational baseline and IS treated as
+            # genuine new evidence, resetting every stall-detection signal
+            # to this point rather than immediately re-counting the
+            # activity that caused the original stall. If the underlying
+            # task still isn't moving after that fresh baseline, normal
+            # stall detection will catch it again on its own -- resetting
+            # the boundary here does not grant any additional immunity
+            # beyond the standard no-progress/no-attempts window.
             self._progress.record(
                 ProgressEvent(
                     kind=ProgressSignalKind.ERROR_RESOLVED,

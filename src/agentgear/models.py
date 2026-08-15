@@ -8,8 +8,10 @@ routing decisions depend on these types carrying no hidden state.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 
 from .exceptions import InvalidBlockedReportError, InvalidObservationError, TaskProfileError
 
@@ -264,17 +266,28 @@ class TaskProfile:
 @dataclass(frozen=True)
 class ComplexityAssessment:
     """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
-    M7) since it directly drives routing decisions. ``factors`` is an
-    internal, diagnostic breakdown for explainability/rationale text only
-    — conventionally each value is also in [0, 1] (analysis.py always
-    produces them that way), but it is not independently validated here,
-    since nothing downstream trusts individual factor values for a
-    routing/budget decision the way it trusts ``score``.
+    M7) since it directly drives routing decisions. Individual values
+    inside ``factors`` are not independently range/finiteness-validated
+    the way ``score`` is (that remains a deliberate, scoped M7 decision) —
+    conventionally each is also in [0, 1] (analysis.py always produces
+    them that way).
+
+    Round 3 / AUDIT3-04 (correcting an inaccurate Round 2 note):
+    ``factors`` is NOT merely diagnostic. ``planning.py`` reads
+    ``factors["ambiguity"]`` and ``factors["architectural_impact"]``
+    directly to decide multi-agent staffing, and ``routing.py`` reads the
+    equivalent keys on ``RiskAssessment.factors`` to decide critical-risk
+    tier/reasoning floors -- both are real, consumed routing/planning
+    inputs. Because of that, ``factors`` is defensively copied and frozen
+    the same way ``score`` is protected: neither mutating the dict a
+    caller originally passed in, nor mutating ``assessment.factors``
+    directly after construction, can change what a later routing/planning
+    call sees for THIS SAME assessment object.
     """
 
     score: float
     level: ComplexityLevel
-    factors: dict[str, float] = field(default_factory=dict)
+    factors: Mapping[str, float] = field(default_factory=dict)
     rationale: str = ""
 
     def __post_init__(self) -> None:
@@ -283,23 +296,36 @@ class ComplexityAssessment:
             raise TaskProfileError(
                 f"level must be a ComplexityLevel, got {type(self.level).__name__}"
             )
+        if not isinstance(self.factors, Mapping):
+            raise TaskProfileError(
+                f"factors must be a dict[str, float], got {type(self.factors).__name__}"
+            )
+        object.__setattr__(self, "factors", MappingProxyType(dict(self.factors)))
 
 
 @dataclass(frozen=True)
 class RiskAssessment:
     """``score`` is a strictly validated [0, 1] boundary value (Round 2 /
-    M7) — see ``ComplexityAssessment`` for why ``factors`` is left
-    unvalidated (diagnostic-only, not itself a routing input)."""
+    M7). See ``ComplexityAssessment`` for why ``factors`` is defensively
+    frozen (Round 3 / AUDIT3-04) despite not being independently
+    range-validated -- it IS a real routing input (``routing.py`` reads
+    ``security_impact``/``data_impact``/``irreversibility`` from it for
+    critical-risk overrides), not diagnostic-only."""
 
     score: float
     level: RiskLevel
-    factors: dict[str, float] = field(default_factory=dict)
+    factors: Mapping[str, float] = field(default_factory=dict)
     rationale: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "score", _validate_unit_interval("score", self.score))
         if not isinstance(self.level, RiskLevel):
             raise TaskProfileError(f"level must be a RiskLevel, got {type(self.level).__name__}")
+        if not isinstance(self.factors, Mapping):
+            raise TaskProfileError(
+                f"factors must be a dict[str, float], got {type(self.factors).__name__}"
+            )
+        object.__setattr__(self, "factors", MappingProxyType(dict(self.factors)))
 
 
 # --------------------------------------------------------------------------
@@ -382,6 +408,15 @@ class ExecutionPlan:
 
 @dataclass(frozen=True)
 class ProgressEvent:
+    """Round 3 / AUDIT3-04 sweep note: unlike ``ComplexityAssessment.
+    factors``/``RiskAssessment.factors`` (which ARE read by planning/
+    routing to make real decisions, and are therefore defensively frozen),
+    ``evidence`` here is a genuinely diagnostic annotation payload -- no
+    code anywhere reads a key out of it to branch on. Mutating it
+    post-construction has no effect on AgentGear's own behavior, so it is
+    deliberately left as a plain, unfrozen dict rather than adding
+    protection nothing downstream needs."""
+
     kind: ProgressSignalKind
     description: str
     at_seconds: float
@@ -452,6 +487,17 @@ class RecoveryEpisode:
     new episode with a clean attempt count); this record is the
     execution-wide, never-reset audit trail of every episode that has
     closed, independent of that per-episode operational state.
+
+    Round 3 / AUDIT3-06: this type only ever represents a CLOSED episode
+    -- the coordinator constructs it exactly once, at
+    ``_close_recovery_episode``, always with a real ``outcome`` and
+    ``closed_at`` already known (there is no "open episode" variant of
+    this dataclass; the in-progress state lives in the coordinator's own
+    private fields instead). Validation reflects that: ``attempts`` may
+    legitimately be empty (e.g. a budget reservation denied BEFORE any
+    attempt ran still closes the episode as BLOCKED with zero attempts,
+    see ``test_recovery_episode_accepts_a_pre_attempt_budget_blocked_
+    episode``) -- ``len(attempts) >= 1`` would be a false invariant.
     """
 
     episode_number: int
@@ -460,6 +506,29 @@ class RecoveryEpisode:
     outcome: RecoveryEpisodeOutcome
     opened_at: float
     closed_at: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "episode_number", _validate_positive_int("episode_number", self.episode_number)
+        )
+        object.__setattr__(
+            self, "opened_at", _validate_observation_timestamp("opened_at", self.opened_at)
+        )
+        object.__setattr__(
+            self, "closed_at", _validate_observation_timestamp("closed_at", self.closed_at)
+        )
+        if self.closed_at < self.opened_at:
+            raise InvalidObservationError(
+                f"closed_at={self.closed_at} must be >= opened_at={self.opened_at}"
+            )
+        if not isinstance(self.outcome, RecoveryEpisodeOutcome):
+            raise InvalidObservationError(
+                f"outcome must be a RecoveryEpisodeOutcome, got {type(self.outcome).__name__}"
+            )
+        if not isinstance(self.attempts, tuple) or not all(
+            isinstance(a, RecoveryAttempt) for a in self.attempts
+        ):
+            raise InvalidObservationError("attempts must be a tuple[RecoveryAttempt, ...]")
 
 
 @dataclass(frozen=True)

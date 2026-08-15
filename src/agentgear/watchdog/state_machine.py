@@ -91,12 +91,25 @@ class ExecutionStateMachine:
                 f"previous transition's at_seconds={self.history[-1].at_seconds}; transitions "
                 "must be reported in non-decreasing time order"
             )
+        # Round 3 / AUDIT3-02: evidence is a strict tuple[str, ...] of
+        # non-blank strings, validated ALL-OR-NOTHING -- not filtered.
+        # Silently dropping a malformed entry (e.g. a stray int, a blank
+        # string mixed in with real evidence) would let bad input pass
+        # while quietly corrupting the permanent audit record with fewer
+        # entries than the caller actually supplied, with no signal that
+        # anything was wrong. A caller either supplies a fully well-formed
+        # evidence tuple, or the whole transition is rejected so they can
+        # fix their input.
         if not isinstance(evidence, tuple):
             raise InvalidObservationError(
                 f"evidence must be a tuple[str, ...], got {type(evidence).__name__}"
             )
-        clean_evidence = tuple(e for e in evidence if isinstance(e, str) and e.strip())
-        if target == ExecutionState.COMPLETED and not clean_evidence:
+        for index, item in enumerate(evidence):
+            if not isinstance(item, str) or not item.strip():
+                raise InvalidObservationError(
+                    f"evidence[{index}] must be a non-empty, non-blank string, got {item!r}"
+                )
+        if target == ExecutionState.COMPLETED and not evidence:
             raise NotCompletedError(
                 f"execution '{self.execution_id}': cannot transition to COMPLETED without "
                 "non-empty evidence of satisfied acceptance criteria"
@@ -106,7 +119,7 @@ class ExecutionStateMachine:
             to_state=target,
             at_seconds=at_seconds,
             note=note,
-            evidence=clean_evidence,
+            evidence=evidence,
         )
         self.history.append(record)
         self.state = target

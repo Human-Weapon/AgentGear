@@ -63,8 +63,14 @@ def test_completed_requires_evidence() -> None:
 
 
 def test_completed_requires_non_blank_evidence_strings() -> None:
+    """Round 3 / AUDIT3-02: a structurally malformed entry (blank string)
+    is an INPUT VALIDATION failure (InvalidObservationError), distinct
+    from "you supplied a well-formed but genuinely empty evidence tuple"
+    (NotCompletedError, see test_completed_rejects_a_genuinely_empty_
+    evidence_tuple below) -- these are different failure modes and now
+    raise different, more specific exception types."""
     sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.REVIEWING)
-    with pytest.raises(NotCompletedError):
+    with pytest.raises(InvalidObservationError):
         sm.transition(ExecutionState.COMPLETED, at_seconds=1.0, evidence=("   ", ""))
 
 
@@ -130,15 +136,52 @@ def test_completed_evidence_is_preserved_in_history() -> None:
     assert record.to_state == ExecutionState.COMPLETED
 
 
-def test_evidence_blank_and_non_string_entries_are_filtered_not_stored() -> None:
+def test_evidence_with_any_blank_or_non_string_entry_is_rejected_wholesale() -> None:
+    """Round 3 / AUDIT3-02: this used to silently filter blank/non-string
+    entries out of the evidence tuple instead of rejecting the call --
+    which meant a caller's mistake (a stray blank string, an accidental
+    non-string) was invisibly dropped from the permanent audit record
+    rather than surfaced. The correct contract is validate-all-then-
+    store-all: a malformed entry anywhere in the tuple rejects the WHOLE
+    transition, and nothing is partially recorded."""
     sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.RUNNING)
+    with pytest.raises(InvalidObservationError):
+        sm.transition(
+            ExecutionState.TESTING,
+            at_seconds=1.0,
+            evidence=("real evidence", "   ", "", "also real"),
+        )
+    # the rejected transition must not have mutated state or history
+    assert sm.state == ExecutionState.RUNNING
+    assert sm.history == []
+
+
+@pytest.mark.parametrize(
+    "bad_evidence",
+    [("done", 42), ("done", ""), ("done", "   "), ("done", None), (42, "done")],
+)
+def test_completed_evidence_mixed_valid_and_invalid_is_rejected_not_truncated(
+    bad_evidence: tuple,
+) -> None:
+    """The exact AUDIT3-02 regression: a MIXED tuple with at least one
+    genuinely valid entry used to pass silently (with the invalid entry
+    dropped) because "non-empty after filtering" was the only gate. It
+    must now be rejected wholesale, same as an all-invalid tuple."""
+    sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.REVIEWING)
+    with pytest.raises(InvalidObservationError):
+        sm.transition(ExecutionState.COMPLETED, at_seconds=1.0, evidence=bad_evidence)
+    assert sm.state == ExecutionState.REVIEWING
+    assert sm.history == []
+
+
+def test_valid_multi_entry_evidence_is_stored_in_full_no_truncation() -> None:
+    sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.REVIEWING)
     sm.transition(
-        ExecutionState.TESTING,
+        ExecutionState.COMPLETED,
         at_seconds=1.0,
-        evidence=("real evidence", "   ", "", "also real"),
+        evidence=("tests pass", "acceptance criteria satisfied", "reviewed"),
     )
-    record = sm.history[-1]
-    assert record.evidence == ("real evidence", "also real")
+    assert sm.history[-1].evidence == ("tests pass", "acceptance criteria satisfied", "reviewed")
 
 
 def test_evidence_defaults_to_empty_tuple_when_not_supplied() -> None:
@@ -156,9 +199,25 @@ def test_evidence_must_be_a_tuple() -> None:
 # --- Round 2 / section 12: COMPLETED must not become easier to forge ------
 
 
-@pytest.mark.parametrize("bad_evidence", [(), ("",), ("   ",), (42,)])
-def test_completed_rejects_every_kind_of_meaningless_evidence(bad_evidence) -> None:
+def test_completed_rejects_a_genuinely_empty_evidence_tuple() -> None:
+    """The one case with nothing structurally wrong in it -- an empty
+    tuple -- is the pure business-rule failure NotCompletedError."""
     sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.REVIEWING)
     with pytest.raises(NotCompletedError):
+        sm.transition(ExecutionState.COMPLETED, at_seconds=1.0, evidence=())
+    assert sm.state == ExecutionState.REVIEWING
+    assert sm.history == []
+
+
+@pytest.mark.parametrize("bad_evidence", [("",), ("   ",), (42,)])
+def test_completed_rejects_every_kind_of_structurally_meaningless_evidence(bad_evidence) -> None:
+    """Round 3 / AUDIT3-02: a non-empty but structurally malformed tuple
+    (blank string, non-string entry) is an INPUT VALIDATION failure
+    (InvalidObservationError), not the "no evidence at all" business rule
+    (NotCompletedError) -- these are deliberately distinct exception
+    types now, see test_completed_rejects_a_genuinely_empty_evidence_tuple."""
+    sm = ExecutionStateMachine(execution_id="e1", state=ExecutionState.REVIEWING)
+    with pytest.raises(InvalidObservationError):
         sm.transition(ExecutionState.COMPLETED, at_seconds=1.0, evidence=bad_evidence)
     assert sm.state == ExecutionState.REVIEWING
+    assert sm.history == []

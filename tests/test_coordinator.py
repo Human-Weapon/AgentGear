@@ -15,6 +15,7 @@ from agentgear.exceptions import (
     InvalidObservationError,
     InvalidStateTransitionError,
     NotCompletedError,
+    RecoveryExhaustedError,
 )
 from agentgear.models import (
     ExecutionState,
@@ -627,3 +628,68 @@ def test_start_with_invalid_input_does_not_leave_a_dangling_reservation() -> Non
     assert w.budget.committed_tokens == 0
     assert w.budget.reserved_tokens == 0
     assert w.state == ExecutionState.PLANNING
+
+
+# --- Round 3 / AUDIT3-03: begin_recovery must not swallow programming ------
+# bugs in a caller-supplied RecoveryEngine as if they were normal business
+# exhaustion.
+
+
+def test_expected_recovery_exhaustion_still_reaches_blocked_cleanly() -> None:
+    """The intended, documented path: RecoveryEngine.next_strategy()
+    raising RecoveryExhaustedError must still drive a clean, validated
+    BLOCKED with a report explaining exhaustion -- this must survive the
+    AUDIT3-03 exception-narrowing fix."""
+    w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=10))
+    w.start(task="x", at_seconds=0.0)
+    for i in range(3):
+        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+
+    def exhausted(*args, **kwargs):
+        raise RecoveryExhaustedError("no strategies left")
+
+    w._recovery_engine.next_strategy = exhausted
+    w.record_recovery_result(at_seconds=20.0, result=RecoveryResult.FAILURE)
+    w.begin_recovery(at_seconds=21.0)
+
+    assert w.state == ExecutionState.BLOCKED
+    report = w.blocked_report
+    assert report is not None
+    assert report.blocker
+    assert report.root_cause
+
+
+def test_unexpected_programming_bug_in_recovery_engine_propagates_not_blocked() -> None:
+    """The AUDIT3-03 regression: a genuine programming bug (AttributeError)
+    in a caller-supplied RecoveryEngine.next_strategy() must propagate as
+    a real exception, NOT get silently reclassified as a normal-looking
+    BLOCKED business report. Catching `Exception` broadly here would hide
+    real bugs from operators as if they were expected exhaustion."""
+    w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=10))
+    w.start(task="x", at_seconds=0.0)
+    for i in range(3):
+        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
+    assert w.state == ExecutionState.RECOVERING
+    w.record_recovery_result(at_seconds=20.0, result=RecoveryResult.FAILURE)
+
+    def buggy(*args, **kwargs):
+        return (None).nonexistent_attribute  # AttributeError, not a business exception
+
+    w._recovery_engine.next_strategy = buggy
+
+    reservations_before = len(w.budget._reservations)
+    committed_cost_before = w.budget.committed_cost
+    attempts_before = len(w._recovery_attempts)
+    history_len_before = len(w.recovery_history)
+
+    with pytest.raises(AttributeError):
+        w.begin_recovery(at_seconds=21.0)
+
+    # No side effects from the failed, never-actually-started attempt.
+    assert w.state == ExecutionState.STALLED  # unchanged: never left STALLED
+    assert len(w.budget._reservations) == reservations_before
+    assert w.budget.committed_cost == committed_cost_before
+    assert len(w._recovery_attempts) == attempts_before
+    assert len(w.recovery_history) == history_len_before
+    assert w.blocked_report is None

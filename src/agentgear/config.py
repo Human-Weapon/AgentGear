@@ -11,7 +11,9 @@ router: swap it in your own config without touching any routing code.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from types import MappingProxyType
 from typing import Any
 
 from .exceptions import ConfigurationError
@@ -284,10 +286,10 @@ class ModelTierMapping:
     """Maps conceptual tiers to real provider/model names. Purely data —
     the router never hardcodes a provider or model name."""
 
-    mapping: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_TIER_MODEL_MAP))
+    mapping: Mapping[str, str] = field(default_factory=lambda: dict(_DEFAULT_TIER_MODEL_MAP))
 
     def __post_init__(self) -> None:
-        if not isinstance(self.mapping, dict):
+        if not isinstance(self.mapping, Mapping):
             raise ConfigurationError("model_tier_mapping must be a dict")
         missing = _VALID_TIERS - set(self.mapping)
         if missing:
@@ -304,6 +306,16 @@ class ModelTierMapping:
                 raise ConfigurationError(
                     f"model_tier_mapping['{tier_name}'] must be a non-empty string"
                 )
+        # Round 3 / AUDIT3-04: `frozen=True` only stops reassigning the
+        # `mapping` field itself; it does nothing to protect the dict that
+        # field points to. Without this, a caller mutating either the
+        # original dict passed to the constructor OR
+        # `model_tier_mapping.mapping` directly could silently redirect
+        # routing decisions for every future call using this SAME
+        # (supposedly immutable) Policy object. Freezing a COPY closes
+        # both paths: the original dict can be mutated freely afterward
+        # with no effect, and `mapping[...] = ...` now raises.
+        object.__setattr__(self, "mapping", MappingProxyType(dict(self.mapping)))
 
     def resolve(self, tier: ModelTier) -> str:
         return self.mapping[tier.value]
@@ -347,13 +359,21 @@ class CriticalRiskPolicy:
     forces an independent review, regardless of what the blended
     complexity/risk score alone would have selected.
 
-    Round 2 / M1: the floor for each ``*_at`` threshold is ``0.0``, not
-    some epsilon above it -- a deployer running an extremely risk-averse
-    policy MAY deliberately set e.g. ``security_impact_at=0.0`` so that
-    *any* nonzero security signal at all forces the floor. That is valid
-    configuration, not a bug: nothing about "critical" requires the
-    threshold to be close to 1.0, only that crossing it always means what
-    the deployer intends it to mean.
+    Round 3 / AUDIT3-01 (correcting an inaccurate Round 2 / M1 note): the
+    floor for each ``*_at`` threshold is ``0.0``, not some epsilon above
+    it, and the comparison against it is inclusive (``signal >=
+    threshold``). This means ``security_impact_at=0.0`` does NOT mean
+    "any nonzero security signal forces the floor" -- it means the floor
+    applies UNCONDITIONALLY, on every task, including one whose
+    ``security_impact`` is exactly ``0.0`` (because ``0.0 >= 0.0`` is
+    true). A deployer who wants "sensitive to any real signal but not to
+    a genuinely zero one" needs a threshold strictly greater than ``0.0``
+    (e.g. the smallest value their integration's precision can
+    distinguish from zero) -- ``0.0`` itself is the "always apply, no
+    matter what" setting, not a "nonzero-only" sentinel. That is valid,
+    intentional configuration for an extremely risk-averse policy; it is
+    just not the "any nonzero signal" behavior a reader might assume from
+    the name alone.
     """
 
     security_impact_at: float = 0.85

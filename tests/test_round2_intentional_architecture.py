@@ -12,6 +12,8 @@ full rationale.
 
 from __future__ import annotations
 
+import pytest
+
 from agentgear.analysis import assess_complexity, assess_risk
 from agentgear.config import CriticalRiskPolicy, Policy, RoutingThresholds
 from agentgear.models import (
@@ -31,16 +33,68 @@ from agentgear.watchdog import ExecutionWatchdog
 from agentgear.watchdog.stall_detection import ActivityRecord, StallDetector
 from agentgear.watchdog.state_machine import ExecutionStateMachine
 
-# --- M1: a critical-risk threshold of 0.0 is valid config, not a bug ------
+# --- M1 / Round 3 AUDIT3-01: a critical-risk threshold of 0.0 is valid ----
+# config, and it means the floor applies UNCONDITIONALLY (every signal
+# value, including an exact 0.0 signal, satisfies `signal >= 0.0`) -- not
+# "any nonzero signal", which was an incorrect characterization in the
+# original Round 2 note. See CriticalRiskPolicy's docstring and
+# docs/audits/remediation-round-3.md for the corrected contract.
 
 
-def test_m1_critical_risk_threshold_zero_means_always_apply() -> None:
-    lenient_floor = CriticalRiskPolicy(security_impact_at=0.0)
-    assert lenient_floor.security_impact_at == 0.0  # accepted, not rejected
+def test_m1_critical_risk_threshold_zero_means_unconditional_always_apply() -> None:
+    """threshold=0.0 is an inclusive floor: it fires even on a genuinely
+    zero-risk task, because the comparison is `signal >= threshold` and
+    `0.0 >= 0.0` is True. This is NOT "any nonzero signal" -- it is
+    "always, unconditionally, unless the caller doesn't supply the signal
+    key at all (which defaults to 0.0 and still fires)."."""
+    always_on = CriticalRiskPolicy(
+        security_impact_at=0.0, data_impact_at=0.0, irreversibility_at=0.0
+    )
+    assert always_on.security_impact_at == 0.0  # accepted, not rejected
 
-    risk = RiskAssessment(score=0.01, level=RiskLevel.MINIMAL, factors={"security_impact": 0.001})
-    reasons = critical_signal_reasons(risk, Policy(critical_risk=lenient_floor))
-    assert reasons, "threshold=0.0 must force the floor on ANY nonzero signal"
+    zero_risk = RiskAssessment(
+        score=0.0,
+        level=RiskLevel.MINIMAL,
+        factors={"security_impact": 0.0, "data_impact": 0.0, "irreversibility": 0.0},
+    )
+    reasons = critical_signal_reasons(zero_risk, Policy(critical_risk=always_on))
+    assert reasons, "threshold=0.0 must fire UNCONDITIONALLY, even for an exactly-zero signal"
+    assert len(reasons) == 3
+
+
+@pytest.mark.parametrize(
+    "factor_key,policy_field",
+    [
+        ("security_impact", "security_impact_at"),
+        ("data_impact", "data_impact_at"),
+        ("irreversibility", "irreversibility_at"),
+    ],
+)
+def test_m1_critical_risk_boundary_table_per_signal(factor_key: str, policy_field: str) -> None:
+    """Exact inclusive-threshold boundary table, independently for each of
+    the three critical-risk signals: signal < threshold never fires,
+    signal == threshold always fires (inclusive), signal > threshold
+    always fires. Explicitly covers the threshold=0.0 / signal=0.0 case
+    the Round 3 audit specifically flagged as ambiguous."""
+    for threshold, signal, should_fire in [
+        (0.0, 0.0, True),  # the exact case the audit singled out
+        (0.01, 0.0, False),
+        (0.01, 0.01, True),
+        (0.5, 0.49, False),
+        (0.5, 0.5, True),
+        (0.5, 0.51, True),
+        (0.85, 0.849, False),
+        (0.85, 0.85, True),
+        (0.85, 1.0, True),
+    ]:
+        policy = Policy(critical_risk=CriticalRiskPolicy(**{policy_field: threshold}))
+        risk = RiskAssessment(score=signal, level=RiskLevel.MINIMAL, factors={factor_key: signal})
+        reasons = critical_signal_reasons(risk, policy)
+        fired = any(factor_key in r for r in reasons)
+        assert fired == should_fire, (
+            f"{factor_key}={signal} vs threshold={threshold}: "
+            f"expected fire={should_fire}, got {fired}"
+        )
 
 
 # --- M2: equal routing thresholds are valid config, not a bug -------------
