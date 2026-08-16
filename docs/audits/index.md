@@ -14,7 +14,7 @@ Commit reference:
 - `bc53151` — Remediation Round 3
 - `f8573ef` — Remediation Round 4
 - `a7e59b7` — Remediation Round 5 (fix commit); `8027e9e` finalized this index for it; `68c829d` corrected AG5-09's own description afterward
-- (this round) — Remediation Round 6
+- `7c3e37c` — Remediation Round 6
 
 ## Round 1 (baseline `5330554`)
 
@@ -148,9 +148,9 @@ Full writeup: `docs/audits/remediation-round-6.md`.
 
 | ID | Description | Classification | Fix commit | Regression test(s) |
 |---|---|---|---|---|
-| AG6-01 | Public watchdog events (`record_activity`, `record_progress`, `record_escalation`, `checkpoint`, `advance`) accepted outside the lifecycle they require -- before `start()`, after `COMPLETED`, or while `BLOCKED`; `advance()` could also bypass `start()`/`record_recovery_result()` entirely | FIXED (P1) | (this round) | `tests/test_round6_hardening.py` (AG6-01 section, full state x event admission matrix) |
-| AG6-02 | The configured persistence root itself (not just a child path beneath it) could be replaced by a Windows junction/symlink after construction, bypassing containment entirely | FIXED (P1, `PersistenceRoot` root-identity guard) | (this round) | `tests/test_round6_hardening.py` (AG6-02 section, real `mklink /J` tests) |
-| AG6-03 | An existing regular file supplied as `state_dir` was accepted until the first heartbeat write raised a raw `FileExistsError` after `start()` had already committed `RUNNING` | FIXED (P2) | (this round) | `tests/test_round6_hardening.py` (AG6-03 section) |
+| AG6-01 | Public watchdog events (`record_activity`, `record_progress`, `record_escalation`, `checkpoint`, `advance`) accepted outside the lifecycle they require -- before `start()`, after `COMPLETED`, or while `BLOCKED`; `advance()` could also bypass `start()`/`record_recovery_result()` entirely | FIXED (P1) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-01 section, full state x event admission matrix) |
+| AG6-02 | The configured persistence root itself (not just a child path beneath it) could be replaced by a Windows junction/symlink after construction, bypassing containment entirely | FIXED (P1, `PersistenceRoot` root-identity guard) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-02 section, real `mklink /J` tests) |
+| AG6-03 | An existing regular file supplied as `state_dir` was accepted until the first heartbeat write raised a raw `FileExistsError` after `start()` had already committed `RUNNING` | FIXED (P2) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-03 section) |
 
 ---
 
