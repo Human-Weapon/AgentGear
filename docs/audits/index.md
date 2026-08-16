@@ -1,9 +1,9 @@
 # AgentGear Audit Index
 
-Traceability map for every finding raised across four independent adversarial
+Traceability map for every finding raised across five independent adversarial
 audit rounds. "Round" = which audit surfaced it; "Fix commit" = the AgentGear
 remediation commit that closed it (short hash, on `main`). See each round's
-own document (`docs/audits/remediation-round-N.md`, N=3,4 -- rounds 1 and 2
+own document (`docs/audits/remediation-round-N.md`, N=3,4,5 -- rounds 1 and 2
 predate this index and are summarized here from their commit messages) for
 full reproduction/root-cause/decision detail.
 
@@ -13,6 +13,7 @@ Commit reference:
 - `51bfac8` / `1cff32b` — Remediation Round 2
 - `bc53151` — Remediation Round 3
 - `f8573ef` — Remediation Round 4
+- `a7e59b7` — Remediation Round 5
 
 ## Round 1 (baseline `5330554`)
 
@@ -118,25 +119,25 @@ Full writeup: `docs/audits/remediation-round-5.md`.
 
 | ID | Description | Classification | Fix commit | Regression test(s) |
 |---|---|---|---|---|
-| AG5-01 | `CheckpointStore.append()`'s segment-capacity check was advisory, not a hard bound, under real concurrency | FIXED (execution-scoped lock) | (this round) | `tests/test_persistence_concurrency.py::test_checkpoint_segment_capacity_is_a_hard_cap_under_real_concurrency`, `tests/test_checkpoints.py` (AG5-01 section) |
-| AG5-02 | `record_recovery_result()` mutated recovery state before validating `result`/`evidence` | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-02 section) |
-| AG5-03 | `ActivityRecord` accepted non-bool `succeeded`/`is_trivial` and malformed `error`; heartbeat dirty flag didn't cover construction failures | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-03 section) |
-| AG5-04 | `ExecutionState` subclasses `str`; `advance("testing")` poisoned the state machine with a raw string | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-04 section) |
-| AG5-05 | Heartbeat went stale (dirty=False but disk out of date) after ordinary `record_activity()`/`checkpoint()` calls | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-05 section) |
-| AG5-06 | Relative `state_dir` silently rebound to the process's CWD at operation time, not construction time | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-06 section) |
-| AG5-07 | `PromptGraphContextProvider` echoed a raw adapter exception message (potential secret leak) into `ContextPackage.note` | FIXED (P3) | (this round) | `tests/test_context_provider.py::test_promptgraph_provider_search_exception_message_is_never_echoed` |
-| AG5-08 | Stale `hermes-oss/promptgraph` link in current-facing README.md | FIXED (P3) | (this round) | `tests/test_release_metadata.py` |
-| AG5-09 | `docs/audits/index.md` shipped with unfinalized `(this round)` placeholders for Round 4's already-fixed findings | FIXED (two-commit workflow) | (this round) | `tests/test_release_metadata.py::test_audit_index_has_no_unfinalized_placeholder_shas` |
-| AG5-10 | `state_dir=""` silently disabled persistence instead of raising | FIXED (P3) | (this round) | `tests/test_round5_hardening.py` (AG5-10 section) |
-| AG5-11 | CI's "standalone" check incorrectly asserted optional siblings must be ABSENT, not merely optional | FIXED (P3) | (this round) | `tests/test_standalone.py::test_core_plan_pipeline_unaffected_by_an_actually_importable_sibling`, `.github/workflows/ci.yml` |
+| AG5-01 | `CheckpointStore.append()`'s segment-capacity check was advisory, not a hard bound, under real concurrency | FIXED (execution-scoped lock) | `a7e59b7` | `tests/test_persistence_concurrency.py::test_checkpoint_segment_capacity_is_a_hard_cap_under_real_concurrency`, `tests/test_checkpoints.py` (AG5-01 section) |
+| AG5-02 | `record_recovery_result()` mutated recovery state before validating `result`/`evidence` | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-02 section) |
+| AG5-03 | `ActivityRecord` accepted non-bool `succeeded`/`is_trivial` and malformed `error`; heartbeat dirty flag didn't cover construction failures | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-03 section) |
+| AG5-04 | `ExecutionState` subclasses `str`; `advance("testing")` poisoned the state machine with a raw string | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-04 section) |
+| AG5-05 | Heartbeat went stale (dirty=False but disk out of date) after ordinary `record_activity()`/`checkpoint()` calls | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-05 section) |
+| AG5-06 | Relative `state_dir` silently rebound to the process's CWD at operation time, not construction time | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-06 section) |
+| AG5-07 | `PromptGraphContextProvider` echoed a raw adapter exception message (potential secret leak) into `ContextPackage.note` | FIXED (P3) | `a7e59b7` | `tests/test_context_provider.py::test_promptgraph_provider_search_exception_message_is_never_echoed` |
+| AG5-08 | Stale `hermes-oss/promptgraph` link in current-facing README.md | FIXED (P3) | `a7e59b7` | `tests/test_release_metadata.py` |
+| AG5-09 | `docs/audits/index.md` shipped with unfinalized ``a7e59b7`` placeholders for Round 4's already-fixed findings | FIXED (two-commit workflow) | `a7e59b7` | `tests/test_release_metadata.py::test_audit_index_has_no_unfinalized_placeholder_shas` |
+| AG5-10 | `state_dir=""` silently disabled persistence instead of raising | FIXED (P3) | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-10 section) |
+| AG5-11 | CI's "standalone" check incorrectly asserted optional siblings must be ABSENT, not merely optional | FIXED (P3) | `a7e59b7` | `tests/test_standalone.py::test_core_plan_pipeline_unaffected_by_an_actually_importable_sibling`, `.github/workflows/ci.yml` |
 
 **Self-adversarial additions (cross-cutting enum sweep, discovered during this round's own
 verification, not pre-specified by the audit brief):**
 
 | ID | Description | Classification | Fix commit | Regression test(s) |
 |---|---|---|---|---|
-| R5-SA-01 | `ExecutionStateMachine.__init__` accepted `state="running"` directly (same str-enum trap as AG5-04, at the constructor rather than `transition()`) | FIXED | (this round) | `tests/test_round5_hardening.py::test_state_machine_constructor_rejects_raw_string_state` |
-| R5-SA-02 | `ExecutionBudgetLedger.reserve(kind=...)` accepted a raw string for `ReservationKind`, poisoning the resulting `BudgetReservation.kind` | FIXED | (this round) | `tests/test_round5_hardening.py::test_budget_ledger_reserve_rejects_raw_string_kind` |
+| R5-SA-01 | `ExecutionStateMachine.__init__` accepted `state="running"` directly (same str-enum trap as AG5-04, at the constructor rather than `transition()`) | FIXED | `a7e59b7` | `tests/test_round5_hardening.py::test_state_machine_constructor_rejects_raw_string_state` |
+| R5-SA-02 | `ExecutionBudgetLedger.reserve(kind=...)` accepted a raw string for `ReservationKind`, poisoning the resulting `BudgetReservation.kind` | FIXED | `a7e59b7` | `tests/test_round5_hardening.py::test_budget_ledger_reserve_rejects_raw_string_kind` |
 
 ---
 
