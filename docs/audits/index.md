@@ -14,7 +14,8 @@ Commit reference:
 - `bc53151` — Remediation Round 3
 - `f8573ef` — Remediation Round 4
 - `a7e59b7` — Remediation Round 5 (fix commit); `8027e9e` finalized this index for it; `68c829d` corrected AG5-09's own description afterward
-- `7c3e37c` — Remediation Round 6
+- `7c3e37c` — Remediation Round 6 (fix commit); `c8f59ff` finalized this index for it
+- `acbb911` — Final promotion audit fix (AGF-01, SECURITY.md wording)
 
 ## Round 1 (baseline `5330554`)
 
@@ -151,6 +152,22 @@ Full writeup: `docs/audits/remediation-round-6.md`.
 | AG6-01 | Public watchdog events (`record_activity`, `record_progress`, `record_escalation`, `checkpoint`, `advance`) accepted outside the lifecycle they require -- before `start()`, after `COMPLETED`, or while `BLOCKED`; `advance()` could also bypass `start()`/`record_recovery_result()` entirely | FIXED (P1) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-01 section, full state x event admission matrix) |
 | AG6-02 | The configured persistence root itself (not just a child path beneath it) could be replaced by a Windows junction/symlink after construction, bypassing containment entirely | FIXED (P1, `PersistenceRoot` root-identity guard) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-02 section, real `mklink /J` tests) |
 | AG6-03 | An existing regular file supplied as `state_dir` was accepted until the first heartbeat write raised a raw `FileExistsError` after `start()` had already committed `RUNNING` | FIXED (P2) | `7c3e37c` | `tests/test_round6_hardening.py` (AG6-03 section) |
+
+---
+
+## Final promotion audit (baseline `c8f59ff`)
+
+The seventh review was a final promotion audit -- confirming release readiness rather than
+searching for new remediation-round-scale findings. It surfaced one documentation-accuracy
+issue, recorded here rather than as a new numbered remediation round.
+
+| ID | Description | Classification | Fix commit | Regression test(s) |
+|---|---|---|---|---|
+| AGF-01 | `SECURITY.md` overstated filesystem containment, implying AgentGear could never write outside a configured `state_dir` -- the actual implementation (see AG6-02, `path_security.py`) provides best-effort TOCTOU mitigation, not an OS-handle-based filesystem sandbox | FIXED — documentation/security-contract accuracy | `acbb911` | `tests/test_release_metadata.py::test_security_policy_accurately_scopes_persistence_containment` |
+
+No production code changed for AGF-01 -- `SECURITY.md`'s wording was corrected to state the
+containment limitation honestly, matching what `path_security.py`'s own docstrings and
+`docs/audits/remediation-round-6.md`'s TOCTOU-honesty section already documented.
 
 ---
 

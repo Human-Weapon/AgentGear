@@ -2,11 +2,11 @@
 
 All notable changes to AgentGear are documented in this file.
 
-## [0.1.0] - Unreleased (release candidate) — Remediation Round 6
+## [0.1.0] - 2026-08-16
 
-Not yet tagged pending independent adversarial audit. Addresses findings from a sixth
-independent adversarial audit (baseline commit `68c829d`). Full writeups:
-`docs/audits/remediation-round-6.md`; cross-round index: `docs/audits/index.md`.
+Addresses findings from a sixth independent adversarial audit (baseline commit `68c829d`).
+Full writeups: `docs/audits/remediation-round-6.md`; cross-round index:
+`docs/audits/index.md`.
 
 ### Changed (user-visible contract changes)
 
