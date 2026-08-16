@@ -99,3 +99,15 @@ class InvalidIdentifierError(PersistenceError):
     filesystem," caught immediately rather than surfacing 10+ seconds
     later as a confusing ``StorageLockError`` once the underlying OS call
     finally fails."""
+
+
+class InvalidPersistenceRootError(PersistenceError):
+    """Raised when a configured persistence root (``state_dir``) exists
+    but is not usable as a directory -- most commonly an existing regular
+    file -- Round 6 / AG6-03. Distinct from ``PathEscapeError`` (the root
+    resolves somewhere unexpected) and ``InvalidIdentifierError`` (an
+    identifier can never be a valid filename): this is "the configured
+    root is the wrong kind of filesystem object," caught immediately
+    rather than surfacing as a raw ``FileExistsError``/``NotADirectoryError``
+    the first time something tries to create a file or directory inside
+    it."""

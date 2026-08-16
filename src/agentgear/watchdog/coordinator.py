@@ -35,6 +35,7 @@ from ..exceptions import (
     BudgetExceededError,
     ConfigurationError,
     InvalidObservationError,
+    InvalidPersistenceRootError,
     InvalidStateTransitionError,
     RecoveryExhaustedError,
 )
@@ -52,7 +53,7 @@ from ..models import (
     RecoveryEpisodeOutcome,
     RecoveryResult,
 )
-from ..path_security import validate_persistence_safe_id
+from ..path_security import PersistenceRoot, validate_persistence_safe_id
 from ..routing import estimate_cost
 from .blocked import build_blocked_report
 from .heartbeat import HeartbeatWriter, build_heartbeat
@@ -203,6 +204,22 @@ class ExecutionWatchdog:
         # atomically here instead, before any state exists to get stuck.
         if state_dir is not None:
             validate_persistence_safe_id("execution_id", execution_id)
+        # Round 6 / AG6-03: an existing REGULAR FILE at state_dir is
+        # structurally impossible to use as a persistence directory --
+        # reject it here, before start() can ever mutate PLANNING ->
+        # RUNNING or consume budget/history, rather than letting the
+        # first heartbeat write fail with a raw FileExistsError deep
+        # inside start(). Uses the SAME shared root-identity guard the
+        # low-level HeartbeatWriter/CheckpointStore construct below (so
+        # there is exactly one validation rule, not a duplicated one),
+        # translating its persistence-domain exception into the stable,
+        # public `ConfigurationError` family this constructor already
+        # uses for every other caller-configuration mistake.
+        if state_dir is not None:
+            try:
+                PersistenceRoot(state_dir)
+            except InvalidPersistenceRootError as exc:
+                raise ConfigurationError(str(exc)) from exc
 
         self.execution_id = execution_id
         self.policy = policy
@@ -320,6 +337,52 @@ class ExecutionWatchdog:
         calling method's operation has fully succeeded -- never on a path
         that is about to raise."""
         self._last_observed_at = at_seconds
+
+    def _require_active_state(self, operation: str) -> None:
+        """Round 6 / AG6-01: lifecycle ADMISSION for every ordinary
+        (non-lifecycle-transition) public event, checked as the very
+        FIRST thing in each such method -- before ``_validate_time()`` or
+        any other input validation -- so an illegal call in the wrong
+        lifecycle state is rejected on its own terms and never masked by
+        (or dependent on) an unrelated input problem like a bad
+        timestamp.
+
+        "Active" means RUNNING/TESTING/REVIEWING -- the states where the
+        underlying task is actually being worked on outside the recovery
+        subsystem. Ordinary work events are deliberately NOT legal:
+
+        * before ``start()`` (PLANNING) -- there is no task in progress
+          yet to record activity/progress/checkpoints/escalation against;
+        * once STALLED/RECOVERING -- the recovery subsystem has its own
+          dedicated APIs (``begin_recovery()``, ``record_recovery_result()``)
+          for tracking what happens during a stall/recovery episode;
+          ordinary activity tracking exists to feed stall DETECTION, which
+          is meaningless once a stall has already been detected;
+        * once BLOCKED -- only the dedicated ``BLOCKED -> RECOVERING``
+          path (``begin_recovery()``) may resume the execution;
+        * once COMPLETED -- terminal; no further domain mutation of any
+          kind is legal (see the class docstring's terminal invariant).
+
+        ``advance()`` -- despite being a state TRANSITION rather than an
+        ordinary event -- uses this SAME check for its CURRENT state, not
+        because its target validation is insufficient, but because
+        without it ``advance()`` was a live escape hatch: called from
+        PLANNING it silently bypassed ``start()``'s own initialization
+        (leaving ``_started_at=None`` while the state reads RUNNING, which
+        permanently disables stall detection -- ``evaluate()`` no-ops
+        whenever ``_started_at is None``); called from RECOVERING it
+        bypassed ``record_recovery_result()`` entirely, silently
+        abandoning a still-PENDING ``RecoveryAttempt`` and leaving the
+        recovery episode forever unresolved. ``advance()``'s own
+        documented purpose (RUNNING <-> TESTING <-> REVIEWING) never
+        needs any state outside this set, so requiring it costs nothing
+        legitimate while closing both escapes.
+        """
+        if self._sm.state not in _ACTIVE_STATES:
+            raise InvalidStateTransitionError(
+                f"{operation}() requires an active execution state "
+                f"(running/testing/reviewing), current state is {self._sm.state.value}"
+            )
 
     def _write_heartbeat(self, at_seconds: float) -> None:
         """Best-effort durable mirror of the in-memory state, called AFTER
@@ -525,6 +588,7 @@ class ExecutionWatchdog:
         check below, which relies on equality/hashing that a raw string
         satisfies just as well as the real enum member.
         """
+        self._require_active_state("advance")
         if not isinstance(target, ExecutionState):
             raise InvalidObservationError(
                 f"target must be an ExecutionState, got {type(target).__name__}"
@@ -554,6 +618,7 @@ class ExecutionWatchdog:
         duration_seconds: float = 0.0,
         error: str | None = None,
     ) -> None:
+        self._require_active_state("record_activity")
         _require_non_blank("fingerprint", fingerprint)
         at_seconds = self._validate_time(at_seconds)
         duration_seconds = _validate_finite_non_negative("duration_seconds", duration_seconds)
@@ -601,6 +666,7 @@ class ExecutionWatchdog:
         description: str,
         evidence: dict | None = None,
     ) -> None:
+        self._require_active_state("record_progress")
         _require_non_blank("description", description)
         at_seconds = self._validate_time(at_seconds)
         event = ProgressEvent(
@@ -881,6 +947,7 @@ class ExecutionWatchdog:
         and, if approved, commit the escalation's cost/tokens and advance
         ``self.tier``/``self.reasoning``.
         """
+        self._require_active_state("record_escalation")
         at_seconds = self._validate_time(at_seconds)
         decision = decide_escalation(
             self.tier,
@@ -916,6 +983,7 @@ class ExecutionWatchdog:
         pending: tuple[str, ...] = (),
         last_good_state: str | None = None,
     ) -> Checkpoint:
+        self._require_active_state("checkpoint")
         _require_non_blank("phase", phase)
         at_seconds = self._validate_time(at_seconds)
         cp = Checkpoint(

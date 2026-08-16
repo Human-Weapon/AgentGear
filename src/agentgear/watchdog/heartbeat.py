@@ -32,7 +32,7 @@ from typing import Any
 
 from ..exceptions import InvalidObservationError
 from ..models import ExecutionState, Heartbeat
-from ..path_security import bind_persistence_root, validate_persistence_safe_id
+from ..path_security import PersistenceRoot, validate_persistence_safe_id
 from ..safe_json_store import SafeJsonStore
 
 _MISSING = object()
@@ -145,12 +145,21 @@ class HeartbeatWriter:
         # process's cwd at construction time -- a relative `state_dir`
         # must always mean the same on-disk location for this writer's
         # lifetime, even if the process later changes its working
-        # directory. See `bind_persistence_root` for why this is distinct
-        # from (and not a replacement for) the per-operation symlink/
-        # junction containment check that still runs on every read/write.
-        self.state_dir = bind_persistence_root(state_dir)
+        # directory. Round 6 / AG6-02 + AG6-03: `PersistenceRoot` also
+        # pins the root's EXPECTED CANONICAL identity at construction
+        # (rejecting an existing non-directory immediately) and re-checks
+        # it on every operation, closing the gap where the configured
+        # root ITSELF -- not just a child path beneath it -- could be
+        # replaced by a symlink/junction after construction. See
+        # `PersistenceRoot`'s own docstring for why this is a distinct
+        # question from child-path containment.
+        self._root = PersistenceRoot(state_dir)
+        self.state_dir = self._root.lexical_root
 
     def _store(self, execution_id: str) -> SafeJsonStore:
+        # Round 6 / AG6-02: verify the root hasn't been replaced BEFORE
+        # any artifact (lock, JSON, temp, quarantine) is created.
+        self._root.assert_identity_unchanged()
         # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too
         # long, illegal filename characters) immediately, before it can
         # reach a filesystem call and eventually surface a confusing

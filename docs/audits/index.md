@@ -1,10 +1,10 @@
 # AgentGear Audit Index
 
-Traceability map for every finding raised across five independent adversarial
+Traceability map for every finding raised across six independent adversarial
 audit rounds. "Round" = which audit surfaced it; "Fix commit" = the AgentGear
 remediation commit that closed it (short hash, on `main`). See each round's
-own document (`docs/audits/remediation-round-N.md`, N=3,4,5 -- rounds 1 and 2
-predate this index and are summarized here from their commit messages) for
+own document (`docs/audits/remediation-round-N.md`, N=3,4,5,6 -- rounds 1 and
+2 predate this index and are summarized here from their commit messages) for
 full reproduction/root-cause/decision detail.
 
 Commit reference:
@@ -13,7 +13,8 @@ Commit reference:
 - `51bfac8` / `1cff32b` — Remediation Round 2
 - `bc53151` — Remediation Round 3
 - `f8573ef` — Remediation Round 4
-- `a7e59b7` — Remediation Round 5
+- `a7e59b7` — Remediation Round 5 (fix commit); `8027e9e` finalized this index for it; `68c829d` corrected AG5-09's own description afterward
+- (this round) — Remediation Round 6
 
 ## Round 1 (baseline `5330554`)
 
@@ -138,6 +139,18 @@ verification, not pre-specified by the audit brief):**
 |---|---|---|---|---|
 | R5-SA-01 | `ExecutionStateMachine.__init__` accepted `state="running"` directly (same str-enum trap as AG5-04, at the constructor rather than `transition()`) | FIXED | `a7e59b7` | `tests/test_round5_hardening.py::test_state_machine_constructor_rejects_raw_string_state` |
 | R5-SA-02 | `ExecutionBudgetLedger.reserve(kind=...)` accepted a raw string for `ReservationKind`, poisoning the resulting `BudgetReservation.kind` | FIXED | `a7e59b7` | `tests/test_round5_hardening.py::test_budget_ledger_reserve_rejects_raw_string_kind` |
+
+---
+
+## Round 6 (baseline `68c829d`, verdict D — not release ready: 0 P0, 2 P1, 1 P2, 0 P3, 0 P4)
+
+Full writeup: `docs/audits/remediation-round-6.md`.
+
+| ID | Description | Classification | Fix commit | Regression test(s) |
+|---|---|---|---|---|
+| AG6-01 | Public watchdog events (`record_activity`, `record_progress`, `record_escalation`, `checkpoint`, `advance`) accepted outside the lifecycle they require -- before `start()`, after `COMPLETED`, or while `BLOCKED`; `advance()` could also bypass `start()`/`record_recovery_result()` entirely | FIXED (P1) | (this round) | `tests/test_round6_hardening.py` (AG6-01 section, full state x event admission matrix) |
+| AG6-02 | The configured persistence root itself (not just a child path beneath it) could be replaced by a Windows junction/symlink after construction, bypassing containment entirely | FIXED (P1, `PersistenceRoot` root-identity guard) | (this round) | `tests/test_round6_hardening.py` (AG6-02 section, real `mklink /J` tests) |
+| AG6-03 | An existing regular file supplied as `state_dir` was accepted until the first heartbeat write raised a raw `FileExistsError` after `start()` had already committed `RUNNING` | FIXED (P2) | (this round) | `tests/test_round6_hardening.py` (AG6-03 section) |
 
 ---
 

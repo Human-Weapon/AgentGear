@@ -2,6 +2,36 @@
 
 All notable changes to AgentGear are documented in this file.
 
+## [0.1.0] - Unreleased (release candidate) — Remediation Round 6
+
+Not yet tagged pending independent adversarial audit. Addresses findings from a sixth
+independent adversarial audit (baseline commit `68c829d`). Full writeups:
+`docs/audits/remediation-round-6.md`; cross-round index: `docs/audits/index.md`.
+
+### Changed (user-visible contract changes)
+
+- **`ExecutionWatchdog.record_activity()`, `record_progress()`, `record_escalation()`,
+  `checkpoint()`, and `advance()` now enforce lifecycle admission**: these are only legal
+  while the execution is RUNNING/TESTING/REVIEWING. Previously `checkpoint()` could be
+  called before `start()`, and all four (plus `record_escalation()`, which had no state
+  check at all) could still be called after `COMPLETED` or while `BLOCKED`, silently
+  mutating history/budget/heartbeat state that should have been immutable. `advance()` also
+  used to silently bypass `start()`'s own initialization when called from `PLANNING`
+  (permanently disabling stall detection) and could bypass `record_recovery_result()`
+  entirely when called from `RECOVERING` (abandoning an unresolved recovery attempt) --
+  both are now rejected.
+- **`HeartbeatWriter`/`CheckpointStore`/`ExecutionWatchdog(state_dir=...)` now detect the
+  configured persistence root itself being replaced** by a symlink/junction after
+  construction (previously only a CHILD path beneath an unchanged root was protected;
+  the root's own identity was never re-verified, so replacing the root itself bypassed
+  containment entirely). Verified with real Windows junctions (`mklink /J`), both for a
+  root that existed at construction and one that didn't yet.
+- **`state_dir` pointing at an existing regular file is now rejected** -- at
+  `ExecutionWatchdog` construction (`ConfigurationError`, before `start()` can commit
+  `RUNNING` or spend budget) and at the low-level `HeartbeatWriter`/`CheckpointStore`
+  constructors and every subsequent operation (new `InvalidPersistenceRootError`),
+  including the race case where the root becomes a regular file only after construction.
+
 ## [0.1.0] - Unreleased (release candidate) — Remediation Round 5
 
 Not yet tagged pending independent adversarial audit. Addresses findings from a fifth

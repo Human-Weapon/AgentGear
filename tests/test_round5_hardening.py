@@ -277,7 +277,13 @@ def test_heartbeat_projection_matrix_success_path(tmp_path) -> None:
     step (section 18)."""
     w = ExecutionWatchdog(
         "e1",
-        _rd5_policy(no_progress_seconds=1.0, no_progress_cycles=1, max_recovery_attempts=5),
+        # Round 6 / AG6-01: no_progress_seconds must be large enough that
+        # the intentional 1-second-apart lifecycle-walk steps below never
+        # accidentally trip a stall themselves (record_activity() is no
+        # longer legal once STALLED/RECOVERING) -- only the DELIBERATE
+        # 95-second gap before the "force a stall" activity further down
+        # should ever cross the threshold.
+        _rd5_policy(no_progress_seconds=10.0, no_progress_cycles=1, max_recovery_attempts=5),
         state_dir=str(tmp_path),
     )
 

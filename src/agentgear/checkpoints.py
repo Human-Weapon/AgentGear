@@ -79,8 +79,8 @@ from typing import Any
 from .exceptions import InvalidObservationError
 from .models import Checkpoint
 from .path_security import (
+    PersistenceRoot,
     assert_path_family_contained,
-    bind_persistence_root,
     validate_persistence_safe_id,
 )
 from .safe_json_store import FileLock, SafeJsonStore
@@ -154,13 +154,25 @@ class CheckpointStore:
     """
 
     def __init__(self, state_dir: str | Path) -> None:
-        # Round 5 / AG5-06: bind to an absolute path NOW (see
-        # `bind_persistence_root`) -- a relative `state_dir` must always
-        # mean the same on-disk location for this store's lifetime, even
-        # across a later `os.chdir()` elsewhere in the process.
-        self.state_dir = bind_persistence_root(state_dir)
+        # Round 5 / AG5-06: bind to an absolute path NOW -- a relative
+        # `state_dir` must always mean the same on-disk location for this
+        # store's lifetime, even across a later `os.chdir()` elsewhere in
+        # the process. Round 6 / AG6-02 + AG6-03: `PersistenceRoot` also
+        # pins the root's EXPECTED CANONICAL identity at construction
+        # (rejecting an existing non-directory immediately) and re-checks
+        # it on every operation -- see its own docstring for why this is
+        # a distinct question from child-path containment.
+        self._root = PersistenceRoot(state_dir)
+        self.state_dir = self._root.lexical_root
 
     def _segment_dir(self, execution_id: str) -> Path:
+        # Round 6 / AG6-02: verify the root hasn't been replaced BEFORE
+        # any artifact (execution lock, segment lock, JSON, temp,
+        # quarantine) is created. `_segment_dir()` is the single choke
+        # point every other method funnels through (including
+        # `_execution_lock()`, which calls this to build the lock path),
+        # so checking here covers all of them.
+        self._root.assert_identity_unchanged()
         # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too
         # long, illegal filename characters) immediately -- it becomes a
         # literal directory-name component here, before it can reach a

@@ -127,17 +127,20 @@ def test_checkpoint_store_survives_concurrent_processes(tmp_path, num_workers: i
 
 @pytest.mark.parametrize(
     "preload,num_workers",
-    [(99, 5), (99, 10), (199, 2), (199, 5), (199, 10)],
+    [(99, 5), (99, 10), (99, 20), (199, 2), (199, 5), (199, 10), (199, 20)],
 )
 def test_checkpoint_segment_capacity_is_a_hard_cap_under_real_concurrency(
     tmp_path, preload: int, num_workers: int
 ) -> None:
-    """Round 5 / AG5-01: preload a segment to just under (or just past) the
-    capacity boundary, then have several REAL processes race to append,
-    released simultaneously via a barrier. NO segment may ever exceed
-    ``_SEGMENT_CAPACITY`` acknowledged entries, and the total stored count
-    must equal exactly preload + num_workers (every acknowledged append
-    survives exactly once -- no loss, no duplication).
+    """Round 5 / AG5-01, re-verified in Round 6 (section 21) after
+    ``CheckpointStore``'s persistence-root guard changed the exact call
+    sequence inside ``_segment_dir()``: preload a segment to just under
+    (or just past) the capacity boundary, then have several REAL
+    processes race to append, released simultaneously via a barrier. NO
+    segment may ever exceed ``_SEGMENT_CAPACITY`` acknowledged entries,
+    and the total stored count must equal exactly preload + num_workers
+    (every acknowledged append survives exactly once -- no loss, no
+    duplication). 20-worker cases added this round for extra margin.
     """
     from agentgear.checkpoints import _SEGMENT_CAPACITY, CheckpointStore
     from agentgear.models import Checkpoint

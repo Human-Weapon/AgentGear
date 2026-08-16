@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .exceptions import InvalidIdentifierError, PathEscapeError
+from .exceptions import InvalidIdentifierError, InvalidPersistenceRootError, PathEscapeError
 
 # Round 4 / NEW-08: a persistence identifier (execution_id) becomes a
 # literal filename/directory-name component (`{execution_id}.heartbeat.
@@ -159,3 +159,83 @@ def safe_join(base: str | Path, *parts: str) -> Path:
     base_path = Path(base)
     joined = base_path.joinpath(*parts)
     return validate_contained(joined, base_path)
+
+
+class PersistenceRoot:
+    """Round 6 / AG6-02 + AG6-03: pins the EXPECTED canonical identity of
+    a persistence root at construction time, and lets every subsequent
+    operation re-verify that identity hasn't changed before creating any
+    artifact (mkdir, lock, JSON, temp, quarantine).
+
+    **Child-containment vs. root-identity -- two different questions.**
+    ``assert_path_family_contained``/``validate_contained`` answer "did a
+    TARGET inside the root escape through a child symlink/junction?" --
+    both the target and the (unquestioned) root are resolved and compared
+    against EACH OTHER at the SAME moment. That check is powerless against
+    the CONFIGURED ROOT ITSELF being replaced after construction: if the
+    root is swapped for a junction pointing elsewhere, a target computed
+    relative to that swapped root resolves through the SAME junction
+    consistently with the (also re-resolved) root -- both sides move
+    together, so a target-vs-root comparison taken only at operation time
+    finds nothing wrong. This class answers the OTHER question instead:
+    "does the root still resolve to what it resolved to when I was
+    constructed?" -- comparing the root against its OWN past self, which
+    a same-moment target-vs-root comparison structurally cannot do.
+
+    **Works whether the root exists yet or not.** At construction,
+    ``resolve_via_nearest_existing_ancestor`` is used to compute the
+    expected identity exactly as it already does for target/root
+    comparisons: if ``state_dir`` doesn't exist yet, this walks up to the
+    nearest existing ancestor, resolves THAT (following any real
+    symlinks/junctions already there), and appends the still-nonexistent
+    tail verbatim. A later NORMAL ``mkdir`` at that lexical location then
+    re-resolves to the SAME identity (a freshly-created plain directory
+    is its own realpath) and passes; a junction planted there instead
+    resolves through to wherever it points and fails the comparison.
+    Both branches of this behavior are exercised by the AG6-02 test
+    matrix (existing root, nonexistent root, each combined with
+    before/after replacement).
+
+    TOCTOU honesty (section 7): this closes the REPRODUCIBLE
+    check-then-open gap (a replaced root is now always caught before the
+    first artifact is created), but still uses ordinary path-based checks,
+    not OS handle-based sandboxing. A sufficiently-privileged local
+    attacker racing between this check and the very next filesystem call
+    is not provably impossible to win against on every platform; v0.1.0
+    does not attempt a handle-based rewrite. See
+    docs/audits/remediation-round-6.md for the full residual-limitation
+    statement.
+    """
+
+    def __init__(self, state_dir: str | Path) -> None:
+        self.lexical_root = bind_persistence_root(state_dir)
+        self._require_directory_or_absent(self.lexical_root)
+        self._expected_canonical_root = resolve_via_nearest_existing_ancestor(self.lexical_root)
+
+    @staticmethod
+    def _require_directory_or_absent(path: Path) -> None:
+        # Round 6 / AG6-03: an existing REGULAR FILE (or any other
+        # non-directory filesystem object) at the configured root can
+        # never be turned into a usable persistence directory -- reject
+        # it immediately rather than let the first mkdir/lock/write fail
+        # with a raw FileExistsError/NotADirectoryError. Checked both at
+        # construction AND on every later call (the race case: the root
+        # was absent at construction, then something created a regular
+        # file there before the first real operation).
+        if path.exists() and not path.is_dir():
+            raise InvalidPersistenceRootError(f"state_dir '{path}' exists but is not a directory")
+
+    def assert_identity_unchanged(self) -> None:
+        """Call before creating ANY artifact under this root. Existing
+        per-target containment checks (``assert_path_family_contained``)
+        remain independent, unmodified, and still run in addition to
+        this."""
+        self._require_directory_or_absent(self.lexical_root)
+        actual = resolve_via_nearest_existing_ancestor(self.lexical_root)
+        if normalize_path_key(actual) != normalize_path_key(self._expected_canonical_root):
+            raise PathEscapeError(
+                f"persistence root '{self.lexical_root}' no longer resolves to its expected "
+                f"identity ('{self._expected_canonical_root}'); it now resolves to '{actual}'. "
+                "It may have been replaced by a symlink/junction (or a directory in its path "
+                "was) after this store was constructed."
+            )

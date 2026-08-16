@@ -40,6 +40,26 @@ def _policy(**watchdog_overrides) -> Policy:
     return Policy(watchdog=WatchdogPolicy(**defaults))
 
 
+_ACTIVE_STATES_FOR_TEST = (ExecutionState.RUNNING, ExecutionState.TESTING, ExecutionState.REVIEWING)
+
+
+def _record_busywork_until_stalled(
+    w: ExecutionWatchdog, count: int, *, start_at: float, prefix: str = "unique"
+) -> None:
+    """Record up to ``count`` no-progress activities, stopping as soon as
+    the watchdog leaves an active state -- Round 6 / AG6-01:
+    ``record_activity()`` is no longer legal once STALLED/RECOVERING/
+    BLOCKED (previously it silently kept accepting calls even after a
+    stall, which is exactly the bug this round fixed). With
+    ``no_progress_cycles=2`` a stall reliably triggers after the 2nd
+    activity, so ``count`` only needs to be "comfortably more than the
+    threshold" to guarantee the stall is reached, not an exact target."""
+    for i in range(count):
+        if w.state not in _ACTIVE_STATES_FOR_TEST:
+            break
+        w.record_activity(at_seconds=start_at + i, fingerprint=f"{prefix}-{i}", succeeded=True)
+
+
 def test_start_enters_running() -> None:
     w = ExecutionWatchdog("e1", _policy())
     w.start(task="do the thing", at_seconds=0.0)
@@ -99,8 +119,7 @@ def test_activity_without_progress_auto_transitions_to_recovering() -> None:
     """
     w = ExecutionWatchdog("e1", _policy())
     w.start(task="busy but stuck", at_seconds=0.0)
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
     assert w.state == ExecutionState.RECOVERING
     assert w.status()["recovery_attempts"] == 1
 
@@ -153,8 +172,7 @@ def test_successful_recovery_establishes_a_fresh_progress_boundary() -> None:
 def test_recovery_success_returns_to_resume_state() -> None:
     w = ExecutionWatchdog("e1", _policy())
     w.start(task="x", at_seconds=0.0)
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
     assert w.state == ExecutionState.RECOVERING
     w.record_recovery_result(at_seconds=100.0, result=RecoveryResult.SUCCESS)
     assert w.state == ExecutionState.RUNNING
@@ -163,8 +181,7 @@ def test_recovery_success_returns_to_resume_state() -> None:
 def test_recovery_failure_returns_to_stalled_for_another_attempt() -> None:
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=10))
     w.start(task="x", at_seconds=0.0)
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
     assert w.state == ExecutionState.RECOVERING
     w.record_recovery_result(at_seconds=100.0, result=RecoveryResult.FAILURE)
     assert w.state == ExecutionState.STALLED
@@ -173,8 +190,7 @@ def test_recovery_failure_returns_to_stalled_for_another_attempt() -> None:
 def test_recovery_exhaustion_reaches_blocked_with_validated_report() -> None:
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=2))
     w.start(task="x", at_seconds=0.0)
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
 
     t = 100.0
     for _ in range(10):
@@ -201,8 +217,7 @@ def test_blocked_is_never_reached_without_a_report() -> None:
     the other (the only route to BLOCKED is _transition_to_blocked)."""
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=1))
     w.start(task="x", at_seconds=0.0)
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
     t = 100.0
     for _ in range(10):
         if w.state == ExecutionState.BLOCKED:
@@ -394,8 +409,7 @@ def test_checkpoint_appears_in_status_and_blocked_report() -> None:
     w.checkpoint(at_seconds=1.0, phase="implementation", completed=("parser",), pending=("tests",))
     assert w.status()["latest_checkpoint"].phase == "implementation"
 
-    for i in range(10):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"unique-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 10, start_at=10.0)
     t = 100.0
     for _ in range(10):
         if w.state == ExecutionState.BLOCKED:
@@ -443,10 +457,23 @@ def test_heartbeat_and_checkpoint_are_persisted_when_state_dir_given(tmp_path) -
 
 def _drive_one_episode_to_success(w: ExecutionWatchdog, *, start_t: float) -> float:
     """Busywork -> STALLED -> RECOVERING -> SUCCESS, using ONLY the public
-    coordinator. Returns the time cursor after the episode closes."""
+    coordinator. Returns the time cursor after the episode closes.
+
+    Round 6 / AG6-01: with ``no_progress_cycles=2`` the stall reliably
+    triggers after exactly 2 activities, well before all 6 iterations of
+    the original loop this replaced could run -- record_activity() is no
+    longer legal once RECOVERING, so the loop must stop as soon as the
+    watchdog leaves an active state.
+    """
     t = start_t
     for i in range(6):
         t += 1.0
+        if w.state not in (
+            ExecutionState.RUNNING,
+            ExecutionState.TESTING,
+            ExecutionState.REVIEWING,
+        ):
+            break
         w.record_activity(at_seconds=t, fingerprint=f"unique-{start_t}-{i}", succeeded=True)
     assert w.state == ExecutionState.RECOVERING
     t += 1.0
@@ -483,7 +510,14 @@ def test_five_successful_recovery_episodes_each_start_fresh() -> None:
     assert w.state == ExecutionState.RUNNING
     assert len(w.recovery_history) == 5
     # Global attempt count accumulated across every episode's busywork.
-    assert w.status()["total_attempts"] == 30
+    # Round 6 / AG6-01: each episode now stops recording activity as soon
+    # as the stall triggers (record_activity() is no longer legal once
+    # RECOVERING) -- with no_progress_cycles=2, that's exactly 2 per
+    # episode, 10 total across 5 episodes. Previously this asserted 30,
+    # which counted activities silently still being recorded AFTER each
+    # episode had already stalled -- itself a symptom of the bug this
+    # round fixed, not a meaningful "total work attempted" count.
+    assert w.status()["total_attempts"] == 10
 
 
 def test_budget_exhausted_on_third_episode_blocks_correctly() -> None:
@@ -523,9 +557,7 @@ def test_budget_exhausted_on_third_episode_blocks_correctly() -> None:
     # now be denied by the ledger -> BLOCKED with a report, not silently
     # granted, and not by releasing anything already committed.
     t += 100.0
-    for i in range(6):
-        t += 1.0
-        w.record_activity(at_seconds=t, fingerprint=f"ep3-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 6, start_at=t + 1.0, prefix="ep3")
     assert w.state == ExecutionState.BLOCKED
     assert w.blocked_report is not None
     assert "budget" in w.blocked_report.blocker.lower() or "budget" in (
@@ -545,8 +577,7 @@ def test_max_recovery_attempts_one_canonical_regression() -> None:
     attempted' when one genuinely was."""
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=1))
     w.start(task="x", at_seconds=0.0)
-    for i in range(6):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 6, start_at=10.0, prefix="u")
     assert w.state == ExecutionState.RECOVERING
 
     w.record_recovery_result(at_seconds=100.0, result=RecoveryResult.FAILURE)
@@ -571,8 +602,7 @@ def test_blocked_state_report_and_heartbeat_agree(tmp_path) -> None:
 
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=1), state_dir=str(tmp_path))
     w.start(task="x", at_seconds=0.0)
-    for i in range(6):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u-{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 6, start_at=10.0, prefix="u")
     w.record_recovery_result(at_seconds=100.0, result=RecoveryResult.FAILURE)
     w.begin_recovery(at_seconds=101.0)
 
@@ -642,8 +672,7 @@ def test_expected_recovery_exhaustion_still_reaches_blocked_cleanly() -> None:
     AUDIT3-03 exception-narrowing fix."""
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=10))
     w.start(task="x", at_seconds=0.0)
-    for i in range(3):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 3, start_at=10.0, prefix="u")
     assert w.state == ExecutionState.RECOVERING
 
     def exhausted(*args, **kwargs):
@@ -668,8 +697,7 @@ def test_unexpected_programming_bug_in_recovery_engine_propagates_not_blocked() 
     real bugs from operators as if they were expected exhaustion."""
     w = ExecutionWatchdog("e1", _policy(max_recovery_attempts=10))
     w.start(task="x", at_seconds=0.0)
-    for i in range(3):
-        w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
+    _record_busywork_until_stalled(w, 3, start_at=10.0, prefix="u")
     assert w.state == ExecutionState.RECOVERING
     w.record_recovery_result(at_seconds=20.0, result=RecoveryResult.FAILURE)
 

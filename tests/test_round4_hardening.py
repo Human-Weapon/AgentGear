@@ -214,6 +214,8 @@ def test_rejected_recovery_result_does_not_advance_clock() -> None:
     w = ExecutionWatchdog("e4", _rd4_policy(max_recovery_attempts=10))
     w.start(task="x", at_seconds=0.0)
     for i in range(3):
+        if w.state != ExecutionState.RUNNING:
+            break
         w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
     assert w.state == ExecutionState.RECOVERING
     with pytest.raises(InvalidObservationError):
@@ -393,6 +395,8 @@ def test_failure_injection_start_complete_blocked_recovery_paths() -> None:
         w2 = ExecutionWatchdog("e-blocked", _rd4_policy(max_recovery_attempts=1), state_dir=td)
         w2.start(task="x", at_seconds=0.0)
         for i in range(3):
+            if w2.state != ExecutionState.RUNNING:
+                break
             w2.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
         assert w2.state == ExecutionState.RECOVERING
         w2.record_recovery_result(at_seconds=20.0, result=RecoveryResult.FAILURE)
@@ -486,6 +490,8 @@ def test_zero_attempt_blocked_episode_via_real_coordinator_still_works() -> None
     w = ExecutionWatchdog("e-zero-attempt", p, context_budget_tokens=tokens_per_episode)
     w.start(task="x", at_seconds=0.0)
     for i in range(3):
+        if w.state != ExecutionState.RUNNING:
+            break
         w.record_activity(at_seconds=float(10 + i), fingerprint=f"u{i}", succeeded=True)
     assert w.state == ExecutionState.BLOCKED
     assert w.blocked_report.attempts == 0
