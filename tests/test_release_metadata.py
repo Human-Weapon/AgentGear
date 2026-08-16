@@ -66,6 +66,15 @@ def test_readme_does_not_reference_the_dead_agentgear_org() -> None:
     assert "hermes-oss/agentgear" not in readme.lower()
 
 
+def test_security_policy_accurately_scopes_persistence_containment() -> None:
+    """The policy must not promise a race-free filesystem sandbox when
+    path_security.py explicitly documents best-effort TOCTOU reduction."""
+    security = (_REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert "best-effort TOCTOU" in security
+    assert "sufficiently privileged local attacker" in security
+    assert "writes outside its configured `state_dir`" not in security
+
+
 def test_audit_index_fix_commit_column_has_no_unfinalized_placeholder() -> None:
     """Round 5 / AG5-09: every finding's "Fix commit" COLUMN must name a
     real, immutable commit (or an explicit non-SHA classification like

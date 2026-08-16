@@ -17,10 +17,10 @@ We will acknowledge receipt within 48 hours and work toward a coordinated disclo
 
 AgentGear is a **compute-orchestration decision** library and CLI. Its security-sensitive surface is:
 
-- **Local file I/O only**: watchdog heartbeats and checkpoints are written under a caller-supplied `state_dir`, path-contained via `path_security.py` (symlink/junction-aware, re-validated immediately before any lock/temp/destination write).
+- **Local file I/O only**: watchdog heartbeats and checkpoints target a caller-supplied `state_dir`, with symlink/junction-aware containment re-validated immediately before any lock, temp, or destination write. This is **best-effort TOCTOU** mitigation, not an OS-handle-based filesystem sandbox: rejected operations leave no outside artifacts in the supported swap scenarios, but a sufficiently privileged local attacker might still win a directory-swap race between validation and the next filesystem call.
 - **No network calls**: AgentGear never sends data anywhere. Routing and planning are pure, local, deterministic computations.
 - **No credential access**: AgentGear does not read `.env` files, API keys, or any credential store, by design — it has no reason to, since it never calls a real model provider in v0.1.0.
-- **No arbitrary code execution**: AgentGear never executes shell commands, installs packages, or writes outside its configured `state_dir`.
+- **No arbitrary code execution**: AgentGear never executes shell commands or installs packages. Its only writes are the persistence artifacts described above, subject to that stated containment limitation.
 
 ## What AgentGear deliberately does NOT do
 
