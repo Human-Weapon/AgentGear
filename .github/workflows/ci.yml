@@ -86,14 +86,38 @@ jobs:
 
           # Round 5 / AG5-09 + section 12.4: the audit traceability index
           # must not ship with placeholder SHAs where a real fix commit is
-          # expected -- every finding's "Fix commit" column must name an
+          # expected -- every finding's "Fix commit" COLUMN must name an
           # actual, immutable commit by the time this is the pushed HEAD.
+          # Scoped to that ONE column, parsed structurally: the
+          # Description column is allowed (and, for AG5-09's own row,
+          # required) to name that same placeholder text historically --
+          # a naive whole-file substring search cannot tell "a live
+          # placeholder" apart from "prose describing a fixed one", and a
+          # prior finalization pass corrupted AG5-09's own description by
+          # blanket-replacing every occurrence, this column included.
+          import re
+
           index = open("docs/audits/index.md", encoding="utf-8").read()
-          for placeholder in ("(this round)", "uncommitted", "TBD SHA", "FIXME SHA"):
-              assert placeholder not in index, (
-                  f"docs/audits/index.md still contains the placeholder {placeholder!r} -- "
-                  "finalize it with real commit SHAs before this becomes the pushed HEAD"
-              )
+          separator_row = re.compile(r"^\|[\s:-]+(\|[\s:-]+)*\|$")
+          placeholders = ("(this round)", "uncommitted", "TBD SHA", "FIXME SHA")
+          rows = []
+          for line in index.splitlines():
+              stripped = line.strip()
+              if not stripped.startswith("|") or not stripped.endswith("|"):
+                  continue
+              if separator_row.fullmatch(stripped):
+                  continue
+              cells = [c.strip() for c in stripped.split("|")[1:-1]]
+              if len(cells) == 5 and cells[0] != "ID":
+                  rows.append(cells)
+          assert rows, "no table rows parsed from docs/audits/index.md -- parser out of date?"
+          for row_id, _description, _classification, fix_commit, _regression in rows:
+              for placeholder in placeholders:
+                  assert placeholder not in fix_commit, (
+                      f"{row_id}'s Fix commit column still contains the placeholder "
+                      f"{placeholder!r} -- finalize it with a real commit SHA before this "
+                      "becomes the pushed HEAD"
+                  )
 
           print("Release metadata OK: wheel METADATA, sdist contents, README, and audit index verified")
           PY

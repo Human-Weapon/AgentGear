@@ -127,7 +127,7 @@ Full writeup: `docs/audits/remediation-round-5.md`.
 | AG5-06 | Relative `state_dir` silently rebound to the process's CWD at operation time, not construction time | FIXED | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-06 section) |
 | AG5-07 | `PromptGraphContextProvider` echoed a raw adapter exception message (potential secret leak) into `ContextPackage.note` | FIXED (P3) | `a7e59b7` | `tests/test_context_provider.py::test_promptgraph_provider_search_exception_message_is_never_echoed` |
 | AG5-08 | Stale `hermes-oss/promptgraph` link in current-facing README.md | FIXED (P3) | `a7e59b7` | `tests/test_release_metadata.py` |
-| AG5-09 | `docs/audits/index.md` shipped with unfinalized ``a7e59b7`` placeholders for Round 4's already-fixed findings | FIXED (two-commit workflow) | `a7e59b7` | `tests/test_release_metadata.py::test_audit_index_has_no_unfinalized_placeholder_shas` |
+| AG5-09 | `docs/audits/index.md` shipped with unfinalized `(this round)` placeholders for Round 4's already-fixed findings | FIXED (two-commit workflow) | `a7e59b7` | `tests/test_release_metadata.py::test_audit_index_has_no_unfinalized_placeholder_shas` |
 | AG5-10 | `state_dir=""` silently disabled persistence instead of raising | FIXED (P3) | `a7e59b7` | `tests/test_round5_hardening.py` (AG5-10 section) |
 | AG5-11 | CI's "standalone" check incorrectly asserted optional siblings must be ABSENT, not merely optional | FIXED (P3) | `a7e59b7` | `tests/test_standalone.py::test_core_plan_pipeline_unaffected_by_an_actually_importable_sibling`, `.github/workflows/ci.yml` |
 
