@@ -162,6 +162,16 @@ class ExecutionBudgetLedger:
         Raises ``BudgetExceededError`` and leaves the ledger unchanged if
         the reservation would push cumulative usage past either ceiling.
         """
+        # Round 5 / cross-cutting enum sweep (AG5-04's pattern):
+        # ReservationKind subclasses str, so a raw same-valued string like
+        # "initial_plan" would previously pass straight through and get
+        # stored on the resulting BudgetReservation.kind -- poisoning it
+        # with a plain str instead of a real enum member, which would
+        # raise a raw AttributeError the first time anything (including
+        # this same method's own error-message formatting on a LATER
+        # call) touched `.kind.value`.
+        if not isinstance(kind, ReservationKind):
+            raise ConfigurationError(f"kind must be a ReservationKind, got {type(kind).__name__}")
         _require_non_negative_int("tokens", tokens)
         _require_non_negative_float("cost", cost)
         if not self.can_afford(tokens=tokens, cost=cost):

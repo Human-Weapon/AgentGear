@@ -195,9 +195,27 @@ class PromptGraphContextProvider(ContextProvider):
                     break
                 chunks.append(content)
         except Exception as exc:  # noqa: BLE001 - optional integration must never crash callers
+            # Round 5 / AG5-07: `exc`'s message is caller-controlled data
+            # from an external, untrusted adapter -- it could contain
+            # anything the adapter's own error path happens to embed (a
+            # credential from a failed auth call, a local file path, part
+            # of a request payload, ...). `ContextPackage.note` is public,
+            # caller-visible diagnostic text that may itself flow into
+            # logs or a model's own context -- echoing the raw exception
+            # message would leak whatever the adapter chose to put in it.
+            # Only the exception's CLASS name (never its message) is
+            # included; anyone needing the full detail should catch and
+            # inspect the exception themselves rather than rely on this
+            # fallback note.
             package = self._fallback.request(request)
             return ContextPackage(
-                **{**package.__dict__, "note": f"promptgraph.memory.search() failed: {exc}"}
+                **{
+                    **package.__dict__,
+                    "note": (
+                        f"PromptGraph integration failed ({type(exc).__name__}); "
+                        "default context fallback used."
+                    ),
+                }
             )
 
         combined = "\n\n".join(chunks)

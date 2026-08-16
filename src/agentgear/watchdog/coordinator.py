@@ -177,6 +177,21 @@ class ExecutionWatchdog:
             raise ConfigurationError(
                 f"state_dir must be a str or None, got {type(state_dir).__name__}"
             )
+        # Round 5 / AG5-10: only `None` means "persistence disabled" --
+        # `""`/whitespace-only previously passed the type check above and
+        # then silently disabled persistence too (`if state_dir else None`
+        # treats any falsy string, including `""`, the same as `None`),
+        # with no error at all. Worse, a NON-empty whitespace string like
+        # `"   "` passed straight through as a real (if bizarre) directory
+        # name. A caller passing a blank string almost certainly meant to
+        # configure a real path and made a mistake -- silently downgrading
+        # that to "no persistence" hides the mistake instead of surfacing
+        # it, so it is now rejected explicitly.
+        if state_dir is not None and not state_dir.strip():
+            raise ConfigurationError(
+                "state_dir must be a non-blank string or None, got "
+                f"{state_dir!r} -- pass None to disable persistence"
+            )
         # Self-adversarial pass (section 33): a state_dir-backed watchdog
         # previously only discovered a filesystem-unsafe execution_id (see
         # NEW-08's InvalidIdentifierError) on its first start(), by which
@@ -229,7 +244,7 @@ class ExecutionWatchdog:
         self._planned_initial_tokens: int | None = None
         self._planned_initial_cost: float | None = None
 
-        self._heartbeat_writer = HeartbeatWriter(state_dir) if state_dir else None
+        self._heartbeat_writer = HeartbeatWriter(state_dir) if state_dir is not None else None
         # Round 4 / NEW-04: durability model is "commit + dirty/sync" (see
         # ExecutionWatchdog's own docstring and
         # docs/audits/remediation-round-4.md). The in-memory state machine
@@ -243,7 +258,7 @@ class ExecutionWatchdog:
         self._heartbeat_sync_error: str | None = None
         self._last_heartbeat_at_seconds: float | None = None
         self._checkpoint_store = None
-        if state_dir:
+        if state_dir is not None:
             from ..checkpoints import CheckpointStore
 
             self._checkpoint_store = CheckpointStore(state_dir)
@@ -314,28 +329,40 @@ class ExecutionWatchdog:
         -- the caller learns persistence failed, but the domain operation
         that already completed is never rolled back or repeated. See
         ``sync_heartbeat()`` for the idempotent recovery path.
+
+        Round 5 / AG5-03/AG5-05: dirty is set BEFORE attempting to build
+        OR write the projection, not only around the writer's I/O call.
+        The in-memory state this method is about to mirror has already
+        changed (that's WHY a caller reached this point), so the durable
+        projection is provisionally stale from the moment this method
+        starts -- if ``build_heartbeat()`` itself fails (a domain
+        validation error inside ``Heartbeat.__post_init__``, not just an
+        I/O error from the writer), the projection must still be reported
+        dirty. Only a build AND write that BOTH fully succeed clear it.
+        There must be no reachable state where the durable heartbeat is
+        stale yet ``heartbeat_dirty`` reads ``False``.
         """
         if self._heartbeat_writer is None:
             return
         self._last_heartbeat_at_seconds = at_seconds
-        heartbeat = build_heartbeat(
-            execution_id=self.execution_id,
-            state=self._sm.state,
-            current_task=self._current_task,
-            current_subtask=None,
-            last_real_progress_at=self._progress.last_progress_at
-            if self._progress.last_progress_at is not None
-            else (self._started_at if self._started_at is not None else at_seconds),
-            last_progress_evidence=self._last_progress_evidence,
-            attempt_count=len(self._activities),
-            current_strategy=self._tried_strategies[-1] if self._tried_strategies else None,
-            last_error=self._last_error,
-            pending_work=self._checkpoints[-1].pending if self._checkpoints else (),
-        )
+        self._heartbeat_dirty = True
         try:
+            heartbeat = build_heartbeat(
+                execution_id=self.execution_id,
+                state=self._sm.state,
+                current_task=self._current_task,
+                current_subtask=None,
+                last_real_progress_at=self._progress.last_progress_at
+                if self._progress.last_progress_at is not None
+                else (self._started_at if self._started_at is not None else at_seconds),
+                last_progress_evidence=self._last_progress_evidence,
+                attempt_count=len(self._activities),
+                current_strategy=self._tried_strategies[-1] if self._tried_strategies else None,
+                last_error=self._last_error,
+                pending_work=self._checkpoints[-1].pending if self._checkpoints else (),
+            )
             self._heartbeat_writer.write(heartbeat)
         except Exception as exc:
-            self._heartbeat_dirty = True
             self._heartbeat_sync_error = str(exc)
             raise
         self._heartbeat_dirty = False
@@ -484,7 +511,24 @@ class ExecutionWatchdog:
         aren't stall/recovery/blocked/complete-specific (e.g. RUNNING ->
         TESTING -> REVIEWING -> RUNNING). Still funnels through the same
         validated state machine as every other coordinator method.
+
+        Round 5 / AG5-04: ``ExecutionState`` subclasses ``str``, so a raw
+        string like ``"testing"`` compares AND hashes equal to
+        ``ExecutionState.TESTING`` -- both the membership check just below
+        and ``ExecutionStateMachine.can_transition()`` would silently
+        accept it, and ``self._sm.state`` would then be assigned that raw
+        string (not a real ``ExecutionState`` member), poisoning every
+        later ``self._sm.state.value`` access (including inside
+        ``status()``) with a raw ``AttributeError``. ``isinstance()`` is
+        the only check that actually distinguishes a real enum member from
+        a same-valued plain string, so it must run BEFORE the membership
+        check below, which relies on equality/hashing that a raw string
+        satisfies just as well as the real enum member.
         """
+        if not isinstance(target, ExecutionState):
+            raise InvalidObservationError(
+                f"target must be an ExecutionState, got {type(target).__name__}"
+            )
         if target in {
             ExecutionState.STALLED,
             ExecutionState.RECOVERING,
@@ -535,7 +579,19 @@ class ExecutionWatchdog:
             self._last_error = error
         self._commit_time(at_seconds)
 
+        # Round 5 / AG5-05: `attempt_count`/`last_error` (both Heartbeat
+        # fields) just changed above -- `evaluate()` only reaches
+        # `_write_heartbeat()` on its STALL path, so ordinary, non-
+        # stalling activity used to leave the durable heartbeat silently
+        # stale (dirty=False, but no longer representing the current
+        # attempt_count). Writing unconditionally here, AFTER evaluate()
+        # has run, keeps the projection current on every path -- on the
+        # stall path evaluate() will have already written it once for the
+        # (different) post-stall state; this second write is a harmless,
+        # idempotent re-sync of whatever the CURRENT state is by then, not
+        # a stale duplicate.
         self.evaluate(at_seconds=at_seconds)
+        self._write_heartbeat(at_seconds)
 
     def record_progress(
         self,
@@ -701,6 +757,20 @@ class ExecutionWatchdog:
         RECOVERING -> ``resume_state``. On FAILURE, either returns to
         STALLED for another attempt or, if bounds/strategies are
         exhausted, drives straight to a validated BLOCKED.
+
+        Round 5 / AG5-02: this method RESOLVES an attempt that has already
+        finished -- ``result`` must therefore be exactly ``SUCCESS`` or
+        ``FAILURE``, never ``PENDING`` (that value exists on
+        ``RecoveryAttempt`` only to represent an attempt still in
+        progress, set internally by ``begin_recovery()``; it is never a
+        valid RESOLUTION to report here). Every input, including
+        ``evidence``'s structural contract (``None`` or a non-blank
+        string, matching its own type hint), is validated BEFORE any
+        mutation -- previously, an invalid ``evidence`` value was only
+        discovered deep inside a follow-on ``ProgressEvent``/
+        ``TransitionRecord`` construction, by which point the attempt had
+        already been overwritten, the episode already closed, and the
+        state machine already transitioned.
         """
         at_seconds = self._validate_time(at_seconds)
         if self._sm.state != ExecutionState.RECOVERING:
@@ -714,6 +784,13 @@ class ExecutionWatchdog:
             raise InvalidObservationError(
                 f"result must be a RecoveryResult, got {type(result).__name__}"
             )
+        if result not in (RecoveryResult.SUCCESS, RecoveryResult.FAILURE):
+            raise InvalidObservationError(
+                "record_recovery_result() resolves a completed attempt; result must be "
+                f"RecoveryResult.SUCCESS or RecoveryResult.FAILURE, got {result.value!r} -- "
+                "PENDING represents an attempt still in progress and cannot be reported as "
+                "a resolution"
+            )
         if not isinstance(resume_state, ExecutionState):
             raise InvalidObservationError(
                 f"resume_state must be an ExecutionState, got {type(resume_state).__name__}"
@@ -722,6 +799,10 @@ class ExecutionWatchdog:
             raise InvalidStateTransitionError(
                 "successful recovery can resume only to planning, running, testing, or reviewing; "
                 f"got {resume_state.value}"
+            )
+        if evidence is not None and (not isinstance(evidence, str) or not evidence.strip()):
+            raise InvalidObservationError(
+                f"evidence must be None or a non-empty, non-blank string, got {evidence!r}"
             )
 
         last = self._recovery_attempts[-1]
@@ -856,6 +937,12 @@ class ExecutionWatchdog:
             self._checkpoint_store.append(cp)
         self._checkpoints.append(cp)
         self._commit_time(at_seconds)
+        # Round 5 / AG5-05: a checkpoint changes `pending_work` (read from
+        # `self._checkpoints[-1].pending`), which IS a Heartbeat field --
+        # this call was previously missing entirely, so the durable
+        # heartbeat's `pending_work` silently went stale on every
+        # checkpoint while `heartbeat_dirty` stayed False.
+        self._write_heartbeat(at_seconds)
         return cp
 
     def complete(self, *, at_seconds: float, evidence: tuple[str, ...]) -> None:

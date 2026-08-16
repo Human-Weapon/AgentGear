@@ -51,6 +51,27 @@ def validate_persistence_safe_id(name: str, value: str) -> str:
     return value
 
 
+def bind_persistence_root(path: str | Path) -> Path:
+    """Round 5 / AG5-06: lexically bind a (possibly relative) persistence
+    root to an ABSOLUTE path at the moment this is called, using the
+    process's CURRENT working directory -- so a later ``os.chdir()``
+    elsewhere in the process can never silently redirect an
+    already-constructed writer/store to a different location on disk than
+    the one its caller actually named.
+
+    This is deliberately LEXICAL binding only (``os.path.abspath``: makes
+    the path absolute and normalizes ``.``/``..`` components) -- it does
+    NOT follow symlinks/junctions, and is NOT a substitute for
+    ``resolve_via_nearest_existing_ancestor``'s per-operation SECURITY
+    canonicalization, which still runs on every read/write to catch a
+    directory entry swapped for a symlink/junction AFTER construction. The
+    two serve different purposes (stable identity vs. per-operation
+    tamper detection) and both are needed -- resolving symlinks once at
+    construction and trusting that forever would defeat the latter.
+    """
+    return Path(os.path.abspath(str(path)))
+
+
 def resolve_canonical(path: str | Path) -> Path:
     """Resolve a path to its canonical form, following symlinks/junctions."""
     resolved = os.path.realpath(str(Path(path)))

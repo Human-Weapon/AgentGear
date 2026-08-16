@@ -46,7 +46,7 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
 
-      - name: Inspect release metadata (Round 4 / NEW-09)
+      - name: Inspect release metadata (Round 4 / NEW-09, Round 5 / AG5-08/AG5-09)
         run: |
           python - <<'PY'
           import glob
@@ -70,7 +70,32 @@ jobs:
           for required in ("README.md", "LICENSE", "SECURITY.md", "CHANGELOG.md", "CONTRIBUTING.md"):
               assert any(n.endswith(required) for n in names), f"sdist is missing {required}"
 
-          print("Release metadata OK: wheel METADATA and sdist contents verified")
+          # Round 5 / AG5-08 + section 30: current-facing docs must point
+          # at the real PromptGraph repo, never the dead hermes-oss org.
+          # Historical audit documents (docs/audits/*.md) are exempt --
+          # they legitimately record what an OLD, already-fixed finding
+          # looked like, and are checked separately below.
+          readme = open("README.md", encoding="utf-8").read()
+          assert "Human-Weapon/PromptGraph" in readme, "README missing the real PromptGraph URL"
+          assert "hermes-oss/promptgraph" not in readme.lower(), (
+              "README still references the dead hermes-oss/promptgraph repo"
+          )
+          assert "hermes-oss/agentgear" not in readme.lower(), (
+              "README still references the dead hermes-oss/agentgear repo"
+          )
+
+          # Round 5 / AG5-09 + section 12.4: the audit traceability index
+          # must not ship with placeholder SHAs where a real fix commit is
+          # expected -- every finding's "Fix commit" column must name an
+          # actual, immutable commit by the time this is the pushed HEAD.
+          index = open("docs/audits/index.md", encoding="utf-8").read()
+          for placeholder in ("(this round)", "uncommitted", "TBD SHA", "FIXME SHA"):
+              assert placeholder not in index, (
+                  f"docs/audits/index.md still contains the placeholder {placeholder!r} -- "
+                  "finalize it with real commit SHAs before this becomes the pushed HEAD"
+              )
+
+          print("Release metadata OK: wheel METADATA, sdist contents, README, and audit index verified")
           PY
 
       - name: Clean wheel-only install (black-box)
@@ -89,16 +114,26 @@ jobs:
           agentgear plan --task "Refactor authentication across 8 files" --files 8 --modules 3 --architectural 0.4 --security 0.6 --json
           agentgear simulate --task "Fix a flaky test" --repeated-failures 2 --json
 
-      - name: Standalone black-box test (no siblings, no network, no API keys)
+      - name: Standalone black-box test -- true isolation (Round 5 / AG5-11)
         run: |
           python - <<'PY'
+          # "Standalone" means AgentGear's own code path never REQUIRES a
+          # sibling ecosystem package to function -- it does NOT mean a
+          # sibling happens to be absent from the environment (see
+          # tests/test_standalone.py's module docstring). This step proves
+          # the TRUE-ISOLATION half: a fresh wheel-only install (no
+          # siblings installed at all, which is simply what this runner's
+          # venv already is) works correctly end to end. The "presence of
+          # an optional sibling must not change core behavior" half is
+          # proven separately in the next step, with promptgraph actually
+          # importable -- previously this step incorrectly asserted
+          # siblings must be ABSENT, which is not what standalone means
+          # and would wrongly fail in any environment (e.g. a shared
+          # hermes-oss monorepo venv) where a sibling legitimately is
+          # importable.
           import agentgear
-          from agentgear import _sibling_utils
           from agentgear.watchdog import ExecutionStateMachine
           from agentgear.models import ExecutionState
-
-          for name in ("promptgraph", "skillguard", "agentbench", "projectkaizen"):
-              assert _sibling_utils.is_installed(name) is False, f"unexpected sibling: {name}"
 
           task = agentgear.TaskProfile(description="Fix a bug", files_affected=2)
           plan = agentgear.plan(task)
@@ -111,5 +146,30 @@ jobs:
           sm.transition(ExecutionState.RUNNING, at_seconds=4.0)
           assert sm.state == ExecutionState.RUNNING
 
-          print("Standalone OK")
+          print("True-isolation standalone OK")
+          PY
+
+      - name: Standalone black-box test -- optional sibling present (Round 5 / AG5-11)
+        run: |
+          mkdir -p /tmp/fake_siblings/promptgraph
+          echo '__version__ = "0.0.0-fake"' > /tmp/fake_siblings/promptgraph/__init__.py
+          PYTHONPATH=/tmp/fake_siblings python - <<'PY'
+          # The OTHER half of "standalone": a sibling package being
+          # importable must not change AgentGear's own core behavior --
+          # only PromptGraphContextProvider.is_available() should notice.
+          import importlib.util
+
+          assert importlib.util.find_spec("promptgraph") is not None, (
+              "test setup broken: fake promptgraph module is not importable"
+          )
+
+          import agentgear
+          from agentgear.context_provider import PromptGraphContextProvider
+
+          task = agentgear.TaskProfile(description="Fix a bug", files_affected=2)
+          plan = agentgear.plan(task)
+          assert plan.primary_model.tier is not None, "core plan() must work regardless"
+          assert PromptGraphContextProvider.is_available() is True
+
+          print("Optional-sibling-present standalone OK")
           PY

@@ -32,7 +32,7 @@ from typing import Any
 
 from ..exceptions import InvalidObservationError
 from ..models import ExecutionState, Heartbeat
-from ..path_security import validate_persistence_safe_id
+from ..path_security import bind_persistence_root, validate_persistence_safe_id
 from ..safe_json_store import SafeJsonStore
 
 _MISSING = object()
@@ -141,7 +141,14 @@ class HeartbeatWriter:
     """
 
     def __init__(self, state_dir: str | Path) -> None:
-        self.state_dir = Path(state_dir)
+        # Round 5 / AG5-06: bind to an absolute path NOW, using the
+        # process's cwd at construction time -- a relative `state_dir`
+        # must always mean the same on-disk location for this writer's
+        # lifetime, even if the process later changes its working
+        # directory. See `bind_persistence_root` for why this is distinct
+        # from (and not a replacement for) the per-operation symlink/
+        # junction containment check that still runs on every read/write.
+        self.state_dir = bind_persistence_root(state_dir)
 
     def _store(self, execution_id: str) -> SafeJsonStore:
         # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too

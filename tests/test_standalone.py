@@ -93,6 +93,42 @@ def test_promptgraph_context_provider_reports_unavailable_when_forced(monkeypatc
     assert "not installed" in package.note
 
 
+def test_core_plan_pipeline_unaffected_by_an_actually_importable_sibling(
+    tmp_path, monkeypatch
+) -> None:
+    """Round 5 / AG5-11: "standalone" means core AgentGear never REQUIRES
+    a sibling -- it does NOT mean a sibling must be ABSENT from the
+    environment. Previously the CI standalone check incorrectly asserted
+    ``_sibling_utils.is_installed("promptgraph") is False``, which would
+    wrongly fail in any environment where a sibling genuinely is
+    importable (e.g. a shared hermes-oss monorepo venv). This test makes
+    ``promptgraph`` genuinely importable -- a real package directory added
+    to ``sys.path``, discoverable by ``importlib.util.find_spec`` exactly
+    like a real pip install, not a monkeypatched stub of AgentGear's own
+    detection function -- and proves core behavior, and
+    ``PromptGraphContextProvider.is_available()`` correctly reporting it
+    as present, are both completely unaffected by its mere presence.
+    """
+    import sys
+
+    pkg_dir = tmp_path / "promptgraph"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("__version__ = '0.0.0-fake'\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "promptgraph", raising=False)
+    import importlib
+
+    importlib.invalidate_caches()
+
+    assert _sibling_utils.is_installed("promptgraph") is True
+
+    profile = agentgear.TaskProfile(description="ship a small fix", files_affected=2)
+    plan = agentgear.plan(profile)
+    assert plan.primary_model.tier is not None
+
+    assert PromptGraphContextProvider.is_available() is True
+
+
 def test_context_provider_degrades_when_promptgraph_forced_available_but_no_instance(
     monkeypatch,
 ) -> None:

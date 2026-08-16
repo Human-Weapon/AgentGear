@@ -33,6 +33,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from ..config import WatchdogPolicy
+from ..exceptions import InvalidObservationError
 from ..models import _validate_non_blank_str, _validate_observation_timestamp
 
 
@@ -64,6 +65,24 @@ class ActivityRecord:
             "duration_seconds",
             _validate_observation_timestamp("duration_seconds", self.duration_seconds),
         )
+        # Round 5 / AG5-03: `succeeded`/`is_trivial` must be a genuine
+        # `bool`, not a truthy stand-in like `1`/`"false"` -- the stall
+        # detector reads `succeeded` to count trailing-identical-failures
+        # (stall_detection.py) and `is_trivial` to gate the trivial-slow-
+        # command signal, so an accidentally-truthy string like `"false"`
+        # (which IS non-empty, hence truthy) would silently corrupt those
+        # verdicts. No coercion is documented for either field, so both
+        # are rejected outright rather than guessed at.
+        if not isinstance(self.succeeded, bool):
+            raise InvalidObservationError(
+                f"succeeded must be a bool, got {type(self.succeeded).__name__}"
+            )
+        if not isinstance(self.is_trivial, bool):
+            raise InvalidObservationError(
+                f"is_trivial must be a bool, got {type(self.is_trivial).__name__}"
+            )
+        if self.error is not None:
+            object.__setattr__(self, "error", _validate_non_blank_str("error", self.error))
 
 
 @dataclass(frozen=True)

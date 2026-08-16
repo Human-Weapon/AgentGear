@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 
 import pytest
 
 from agentgear.checkpoints import _SEGMENT_CAPACITY, CheckpointStore
-from agentgear.exceptions import CorruptStorageError, InvalidObservationError
+from agentgear.exceptions import CorruptStorageError, InvalidObservationError, PathEscapeError
 from agentgear.models import Checkpoint
+
+
+def _make_junction(link: str, target: str) -> None:
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", link, target],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"could not create junction on this system: {result.stderr or result.stdout}")
 
 
 def test_latest_is_none_when_no_checkpoints(tmp_path) -> None:
@@ -226,3 +238,64 @@ def test_corrupt_segment_is_reported_precisely_without_losing_other_segments(
     for path, before in zip(healthy_paths, healthy_contents_before, strict=True):
         assert path.exists()
         assert path.read_text(encoding="utf-8") == before
+
+
+# --- Round 5 / AG5-01: execution-scoped lock hardens the capacity bound ---
+
+
+def test_sequential_appends_never_exceed_segment_capacity(tmp_path) -> None:
+    """Baseline sanity check (no concurrency involved): 250 sequential
+    appends must land as [100, 100, 50], never overshooting the cap --
+    the execution lock must not change single-writer behavior."""
+    store = CheckpointStore(tmp_path)
+    for i in range(250):
+        store.append(Checkpoint(execution_id="exec-1", phase=f"p{i}", at_seconds=float(i)))
+    sizes = [
+        len(store._segment_store("exec-1", n).read()) for n in store._segment_numbers("exec-1")
+    ]
+    assert sizes == [100, 100, 50]
+    assert len(store.all("exec-1")) == 250
+
+
+def test_no_single_append_rewrites_more_than_one_segment(tmp_path) -> None:
+    """Structural bound (section 3.8): even with the new execution lock,
+    a single append() must only ever read/rewrite its ONE target segment
+    file -- never re-serialize earlier, already-full segments."""
+    store = CheckpointStore(tmp_path)
+    for i in range(150):
+        store.append(Checkpoint(execution_id="exec-1", phase=f"p{i}", at_seconds=float(i)))
+    segment_1_path = _segment_path(tmp_path, "exec-1", 1)
+    mtime_before = segment_1_path.stat().st_mtime_ns
+    store.append(Checkpoint(execution_id="exec-1", phase="p150", at_seconds=150.0))
+    assert segment_1_path.stat().st_mtime_ns == mtime_before, (
+        "appending to segment 2 must not touch segment 1's file at all"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows/NTFS reparse-point concept")
+def test_execution_lock_path_rejects_post_construction_junction_swap(tmp_path) -> None:
+    """Round 5 / AG5-01 introduces a new lock file
+    (``{execution_id}.checkpoints/.execution.lock``) -- new filesystem
+    attack surface that must be just as contained as every other artifact
+    this module writes. Swap the execution's segment directory for a
+    junction pointing outside ``state_dir`` AFTER the store already knows
+    about it, then attempt an append: it must be rejected with zero
+    artifacts written outside the trusted root."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    store = CheckpointStore(state_dir)
+    store.append(Checkpoint(execution_id="exec-1", phase="p0", at_seconds=0.0))
+
+    seg_dir = state_dir / "exec-1.checkpoints"
+    import shutil
+
+    shutil.rmtree(seg_dir)
+    _make_junction(str(seg_dir), str(outside))
+
+    with pytest.raises(PathEscapeError):
+        store.append(Checkpoint(execution_id="exec-1", phase="p1", at_seconds=1.0))
+
+    assert list(outside.iterdir()) == [], "no artifact must be written outside state_dir"

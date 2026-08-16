@@ -130,6 +130,31 @@ def test_promptgraph_provider_survives_search_exception(monkeypatch) -> None:
     assert "failed" in package.note
 
 
+def test_promptgraph_provider_search_exception_message_is_never_echoed(monkeypatch) -> None:
+    """Round 5 / AG5-07: the raw exception message is caller-controlled
+    data from an untrusted external adapter and must never appear in the
+    public, potentially-logged ContextPackage.note -- only the exception
+    CLASS name is safe to surface."""
+
+    class FakeMemory:
+        def search(self, query: str, limit: int = 10):
+            raise RuntimeError("API_KEY=sk-audit-secret C:\\private\\config.py\npassword=hunter2")
+
+    class FakeInstance:
+        memory = FakeMemory()
+
+    monkeypatch.setattr(
+        "agentgear.context_provider.PromptGraphContextProvider.is_available",
+        staticmethod(lambda: True),
+    )
+    provider = PromptGraphContextProvider(promptgraph_instance=FakeInstance())
+    package = provider.request(ContextRequest(topic="auth", budget_tokens=100))
+    for secret in ("sk-audit-secret", "C:\\private", "hunter2", "API_KEY", "password"):
+        assert secret not in package.note, f"leaked secret fragment: {secret!r}"
+    assert "RuntimeError" in package.note
+    assert package.content == ""
+
+
 def test_get_default_provider_without_instance_is_default() -> None:
     provider = get_default_provider()
     assert isinstance(provider, DefaultContextProvider)
@@ -323,7 +348,11 @@ def test_generator_exception_after_one_yield_falls_back_safely(monkeypatch) -> N
     package = provider.request(ContextRequest(topic="x", budget_tokens=1000))
     assert package.source == "default"
     assert "failed" in package.note
-    assert "boom mid-iteration" in package.note
+    # Round 5 / AG5-07: the raw exception message is no longer echoed
+    # (it's untrusted data from an external adapter) -- only the
+    # exception class name is safe to surface in this public note.
+    assert "boom mid-iteration" not in package.note
+    assert "RuntimeError" in package.note
 
 
 @pytest.mark.parametrize(

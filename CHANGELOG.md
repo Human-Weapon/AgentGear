@@ -2,6 +2,63 @@
 
 All notable changes to AgentGear are documented in this file.
 
+## [0.1.0] - Unreleased (release candidate) — Remediation Round 5
+
+Not yet tagged pending independent adversarial audit. Addresses findings from a fifth
+independent adversarial audit (baseline commit `f8573ef`). Full writeups:
+`docs/audits/remediation-round-5.md`; cross-round index: `docs/audits/index.md`.
+
+### Changed (user-visible contract changes)
+
+- **`CheckpointStore.append()` now enforces a HARD segment-capacity cap under real
+  concurrency**, via a new execution-scoped file lock. Previously, several concurrent
+  processes could each observe "still room" in the same segment and all append to it,
+  overshooting `_SEGMENT_CAPACITY` (documented as merely "advisory" before). Public
+  `append()`/`all()`/`latest()` behavior is otherwise unchanged.
+- **`ExecutionWatchdog.record_recovery_result()`** now validates `result` (must be exactly
+  `RecoveryResult.SUCCESS` or `RecoveryResult.FAILURE` -- `PENDING` is rejected) and
+  `evidence` (must be `None` or a non-blank string) BEFORE any state mutation, instead of
+  discovering an invalid value deep inside a follow-on construction after the recovery
+  attempt, episode, and state machine had already been mutated.
+- **`ActivityRecord`** (used by `ExecutionWatchdog.record_activity()`) now validates
+  `succeeded`/`is_trivial` as strict `bool` (no int/string coercion) and `error` as `None`
+  or a non-blank string.
+- **`ExecutionWatchdog.advance()`** now validates its `target` argument is a real
+  `ExecutionState` instance -- previously a raw string with the same value (e.g.
+  `"testing"`) was silently accepted and corrupted `state` with a plain `str`, breaking
+  every later `.value` access. The same guard was added to the low-level
+  `ExecutionStateMachine.transition()` and `__init__`, and to
+  `ExecutionBudgetLedger.reserve()`'s `kind` parameter (the identical `str`-subclassing
+  trap, found during this round's own enum sweep).
+- **Heartbeat freshness contract extended**: `record_activity()` and `checkpoint()` now
+  sync the durable heartbeat on every call (previously `record_activity()` only did so via
+  a stall-path side effect, and `checkpoint()` never did at all, silently going stale
+  while `heartbeat_dirty` stayed `False`). `heartbeat_dirty` is now set BEFORE attempting
+  to build or write the projection (not only around the write call), so a failure during
+  heartbeat *construction* (not just I/O) is now correctly reported as dirty too.
+- **`HeartbeatWriter`/`CheckpointStore`/`ExecutionWatchdog(state_dir=...)`** now bind a
+  relative `state_dir` to an absolute path at construction time. Previously a relative
+  `state_dir` silently rebound to wherever the process's current working directory
+  happened to be at the moment of each read/write, so a later `os.chdir()` elsewhere in
+  the process could redirect persistence to an unrelated location without any error.
+- **`ExecutionWatchdog(state_dir=...)`** now rejects a blank/whitespace-only string
+  (`ConfigurationError`) instead of silently disabling persistence (`""`) or accepting it
+  as a literal, almost-certainly-unintended directory name (`"   "`). Only `None`
+  disables persistence.
+- **`PromptGraphContextProvider`** no longer echoes a search-failure exception's raw
+  message into the public `ContextPackage.note` -- only the exception's class name is
+  included now, since the message is untrusted data from an external adapter that could
+  contain secrets, paths, or other sensitive fragments.
+- Corrected the current-facing `README.md`'s PromptGraph link (was still pointing at the
+  dead `hermes-oss/promptgraph`); `docs/audits/index.md`'s Round 4 entries, which had
+  never been finalized with real commit SHAs, now cite `f8573ef`; a new CI/test check
+  rejects any unfinalized placeholder shipping in `docs/audits/index.md` going forward.
+- Fixed the CI "standalone" check, which incorrectly asserted optional sibling packages
+  (PromptGraph, etc.) must be ABSENT from the environment -- "standalone" means AgentGear
+  never *requires* them, not that they must be uninstalled. CI now separately proves true
+  isolation (no siblings present) and that a genuinely-importable sibling doesn't change
+  core behavior.
+
 ## [0.1.0] - Unreleased (release candidate) — Remediation Round 4
 
 Not yet tagged pending independent adversarial audit. Addresses findings from a fourth

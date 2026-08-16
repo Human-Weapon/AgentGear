@@ -68,6 +68,18 @@ class ExecutionStateMachine:
     state: ExecutionState = ExecutionState.PLANNING
     history: list[TransitionRecord] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        # Round 5 / cross-cutting enum sweep (AG5-04's pattern): this is a
+        # public, directly-constructible class -- a caller passing
+        # `state="running"` (a raw, same-valued string) would otherwise
+        # poison `self.state` with a plain str before `transition()`'s own
+        # isinstance guard ever runs, since the constructor is a separate
+        # entry point it doesn't cover.
+        if not isinstance(self.state, ExecutionState):
+            raise InvalidObservationError(
+                f"state must be an ExecutionState, got {type(self.state).__name__}"
+            )
+
     def can_transition(self, target: ExecutionState) -> bool:
         return target in _ALLOWED[self.state]
 
@@ -79,6 +91,19 @@ class ExecutionStateMachine:
         evidence: tuple[str, ...] = (),
         note: str = "",
     ) -> None:
+        # Round 5 / AG5-04: this class is a public, independently-usable
+        # primitive (not only reached through the coordinator's own
+        # `advance()` guard) -- ``ExecutionState`` subclasses ``str``, so
+        # ``can_transition()``'s ``target in _ALLOWED[self.state]`` check
+        # below would accept a raw same-valued string just as readily as
+        # the real enum member (both compare AND hash equal), and then
+        # assign that raw string to ``self.state``, corrupting every later
+        # ``.value`` access. A public boundary must not depend on a
+        # low-level primitive it doesn't itself guard staying un-poisoned.
+        if not isinstance(target, ExecutionState):
+            raise InvalidObservationError(
+                f"target must be an ExecutionState, got {type(target).__name__}"
+            )
         if not self.can_transition(target):
             raise InvalidStateTransitionError(
                 f"execution '{self.execution_id}': cannot transition "

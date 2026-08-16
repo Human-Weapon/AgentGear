@@ -51,6 +51,27 @@ def _append_checkpoint_worker(state_dir: str, worker_id: int, count: int) -> Non
         )
 
 
+def _append_checkpoint_after_barrier_worker(
+    state_dir: str, worker_id: int, barrier: multiprocessing.Barrier
+) -> None:
+    """Round 5 / AG5-01: unlike ``_append_checkpoint_worker`` (which relies
+    on natural OS scheduling overlap across many iterations), this worker
+    does exactly ONE append, released by a shared barrier so every worker's
+    single append is scheduled as close to simultaneously as possible --
+    maximizing the odds of hitting the exact race the segment-capacity
+    hard-cap fix must close: several processes independently observing
+    "segment still has room" at once.
+    """
+    from agentgear.checkpoints import CheckpointStore
+    from agentgear.models import Checkpoint
+
+    store = CheckpointStore(state_dir)
+    barrier.wait()
+    store.append(
+        Checkpoint(execution_id="race-exec", phase=f"race-{worker_id}", at_seconds=float(worker_id))
+    )
+
+
 def _run_workers(target, args_list, timeout: float = 60.0) -> None:
     procs = [multiprocessing.Process(target=target, args=args) for args in args_list]
     for p in procs:
@@ -102,6 +123,47 @@ def test_checkpoint_store_survives_concurrent_processes(tmp_path, num_workers: i
     assert len(history) == num_workers * iterations
     phases = {c.phase for c in history}
     assert len(phases) == num_workers * iterations, "some checkpoint entries were overwritten/lost"
+
+
+@pytest.mark.parametrize(
+    "preload,num_workers",
+    [(99, 5), (99, 10), (199, 2), (199, 5), (199, 10)],
+)
+def test_checkpoint_segment_capacity_is_a_hard_cap_under_real_concurrency(
+    tmp_path, preload: int, num_workers: int
+) -> None:
+    """Round 5 / AG5-01: preload a segment to just under (or just past) the
+    capacity boundary, then have several REAL processes race to append,
+    released simultaneously via a barrier. NO segment may ever exceed
+    ``_SEGMENT_CAPACITY`` acknowledged entries, and the total stored count
+    must equal exactly preload + num_workers (every acknowledged append
+    survives exactly once -- no loss, no duplication).
+    """
+    from agentgear.checkpoints import _SEGMENT_CAPACITY, CheckpointStore
+    from agentgear.models import Checkpoint
+
+    state_dir = str(tmp_path)
+    store = CheckpointStore(state_dir)
+    for i in range(preload):
+        store.append(Checkpoint(execution_id="race-exec", phase=f"pre-{i}", at_seconds=float(i)))
+
+    barrier = multiprocessing.Barrier(num_workers)
+    _run_workers(
+        _append_checkpoint_after_barrier_worker,
+        [(state_dir, i, barrier) for i in range(num_workers)],
+    )
+
+    history = store.all("race-exec")
+    assert len(history) == preload + num_workers
+    phases = {c.phase for c in history}
+    assert len(phases) == preload + num_workers, "some checkpoint entries were overwritten/lost"
+
+    for segment_number in store._segment_numbers("race-exec"):
+        segment_data = store._segment_store("race-exec", segment_number).read()
+        assert len(segment_data) <= _SEGMENT_CAPACITY, (
+            f"segment {segment_number} holds {len(segment_data)} entries, "
+            f"exceeding the hard cap of {_SEGMENT_CAPACITY}"
+        )
 
 
 def test_repeated_heartbeat_runs_never_corrupt_the_file(tmp_path) -> None:

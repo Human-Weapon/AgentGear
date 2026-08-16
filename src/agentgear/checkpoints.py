@@ -51,6 +51,23 @@ quarantined and reported WITHOUT touching any other (healthy) segment --
 segmenting makes quarantine strictly more surgical than the single-file
 design, where the corrupt part and "the whole history" were the same
 file.
+
+Round 5 / AG5-01: ``_SEGMENT_CAPACITY`` is a HARD bound, not an advisory
+target -- no execution schedule, including real concurrent processes, may
+ever leave a segment holding more than ``_SEGMENT_CAPACITY`` acknowledged
+checkpoints. The original design picked its target segment with an
+UNLOCKED peek read, then relied on ``SafeJsonStore.update()``'s own
+per-segment lock only for the individual append -- which prevents lost
+writes, but not several processes independently observing "segment 1 has
+99 entries, still room" and all deciding to append there, overshooting the
+cap. ``append()`` now acquires ONE execution-scoped lock
+(``{execution_id}.checkpoints/.execution.lock``) around the ENTIRE
+select-target -> recheck-capacity -> choose/create-rollover -> append
+sequence, so the whole decision is atomic with respect to every other
+appender for the same execution. Lock order is always EXECUTION lock
+first, then the per-segment ``SafeJsonStore`` lock second (acquired inside
+``store.update()``) -- never the reverse anywhere in this module, so there
+is no cross-lock deadlock potential.
 """
 
 from __future__ import annotations
@@ -61,8 +78,12 @@ from typing import Any
 
 from .exceptions import InvalidObservationError
 from .models import Checkpoint
-from .path_security import validate_persistence_safe_id
-from .safe_json_store import SafeJsonStore
+from .path_security import (
+    assert_path_family_contained,
+    bind_persistence_root,
+    validate_persistence_safe_id,
+)
+from .safe_json_store import FileLock, SafeJsonStore
 
 _MISSING = object()
 
@@ -133,7 +154,11 @@ class CheckpointStore:
     """
 
     def __init__(self, state_dir: str | Path) -> None:
-        self.state_dir = Path(state_dir)
+        # Round 5 / AG5-06: bind to an absolute path NOW (see
+        # `bind_persistence_root`) -- a relative `state_dir` must always
+        # mean the same on-disk location for this store's lifetime, even
+        # across a later `os.chdir()` elsewhere in the process.
+        self.state_dir = bind_persistence_root(state_dir)
 
     def _segment_dir(self, execution_id: str) -> Path:
         # Round 4 / NEW-08: reject a permanently-unsafe execution_id (too
@@ -170,31 +195,47 @@ class CheckpointStore:
             validator=_validate_segment_schema,
         )
 
+    def _execution_lock(self, execution_id: str) -> FileLock:
+        """Round 5 / AG5-01: ONE lock per execution, held around the whole
+        select-segment/recheck-capacity/rollover/append decision in
+        ``append()`` -- not per-segment, and not global to every AgentGear
+        execution. The lock file itself lives inside the execution's own
+        segment directory (excluded from ``_segment_numbers()`` by name,
+        since it never matches ``_SEGMENT_NAME_RE``), so it is naturally
+        path-contained and cleaned up alongside that directory.
+        """
+        seg_dir = self._segment_dir(execution_id)
+        lock_path = seg_dir / ".execution.lock"
+
+        def _pre(p: Path) -> None:
+            assert_path_family_contained(p, trusted_root=self.state_dir)
+
+        return FileLock(lock_path, pre_create_check=_pre)
+
     def append(self, checkpoint: Checkpoint) -> None:
         execution_id = checkpoint.execution_id
-        numbers = self._segment_numbers(execution_id)
-        target = numbers[-1] if numbers else 1
-        store = self._segment_store(execution_id, target)
-
-        # Bounded peek (reads at most ONE segment, capped at
-        # _SEGMENT_CAPACITY entries) to decide whether to roll over to a
-        # fresh segment. This is advisory, not authoritative: the actual
-        # append below always goes through SafeJsonStore.update(), which
-        # re-reads the CURRENT content under a real lock before mutating,
-        # so correctness never depends on this peek being fresh. Under a
-        # rare concurrent-rollover race, a segment may end up modestly
-        # over `_SEGMENT_CAPACITY` (harmless -- entries are never lost or
-        # misordered, a segment is just briefly a little larger than the
-        # soft target) rather than ever writing to the wrong place.
-        current = store.read()
-        count = 0 if current is _MISSING else len(current)
-        if count >= _SEGMENT_CAPACITY:
-            target += 1
+        # Round 5 / AG5-01: the execution lock is acquired FIRST and held
+        # across the entire decision -- select target segment, recheck its
+        # current size, roll over if full, append -- so no other process
+        # for this SAME execution can observe a stale "still room" snapshot
+        # and independently decide to append to the same nearly-full
+        # segment. `store.update()` below still acquires its own per-
+        # segment lock internally (lock order: execution lock, then
+        # segment lock -- never the reverse anywhere in this module).
+        with self._execution_lock(execution_id):
+            numbers = self._segment_numbers(execution_id)
+            target = numbers[-1] if numbers else 1
             store = self._segment_store(execution_id, target)
 
-        store.update(
-            lambda current: [*([] if current is _MISSING else current), _to_dict(checkpoint)]
-        )
+            current = store.read()
+            count = 0 if current is _MISSING else len(current)
+            if count >= _SEGMENT_CAPACITY:
+                target += 1
+                store = self._segment_store(execution_id, target)
+
+            store.update(
+                lambda current: [*([] if current is _MISSING else current), _to_dict(checkpoint)]
+            )
 
     def all(self, execution_id: str) -> list[Checkpoint]:
         result: list[Checkpoint] = []

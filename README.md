@@ -23,7 +23,7 @@ Part of the HERMES OSS ecosystem (PromptGraph, AgentGear, SkillGuard, AgentBench
 
 ## What AgentGear IS NOT
 
-- **Not a context builder.** AgentGear can say "I need context on AUTH, budget 8000 tokens" via the abstract `ContextProvider` interface, but it does not build a context graph. That is [PromptGraph](https://github.com/hermes-oss/promptgraph)'s job.
+- **Not a context builder.** AgentGear can say "I need context on AUTH, budget 8000 tokens" via the abstract `ContextProvider` interface, but it does not build a context graph. That is [PromptGraph](https://github.com/Human-Weapon/PromptGraph)'s job.
 - **Not a skill/security validator.** AgentGear does not decide whether a skill, plugin, or automation is safe to run. That is SkillGuard's job.
 - **Not a benchmarking tool.** AgentGear does not measure which strategy performed best historically, though it defines a stable `EvidenceSource` interface an external benchmarking tool (AgentBench) could implement in the future. Not wired into routing in v0.1.0.
 - **Not a project-improvement tool.** It does not suggest what to refactor or clean up — that is ProjectKaizen's job.

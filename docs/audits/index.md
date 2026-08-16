@@ -12,7 +12,7 @@ Commit reference:
 - `dbdcaa9` — Remediation Round 1
 - `51bfac8` / `1cff32b` — Remediation Round 2
 - `bc53151` — Remediation Round 3
-- (current, uncommitted at time of writing) — Remediation Round 4
+- `f8573ef` — Remediation Round 4
 
 ## Round 1 (baseline `5330554`)
 
@@ -92,23 +92,51 @@ Full writeup: `docs/audits/remediation-round-4.md`.
 
 | ID | Description | Classification | Fix commit | Regression test(s) |
 |---|---|---|---|---|
-| NEW-01 | `RiskAssessment`/`ComplexityAssessment` factor VALUES unvalidated (NaN defeats `signal >= threshold`) | FIXED | (this round) | `tests/test_round4_hardening.py` (NEW-01 section) |
-| NEW-02 | `ExecutionWatchdog.__init__` accepted invalid tier/reasoning/policy/budget, failing later with a raw error | FIXED | (this round) | `tests/test_round4_hardening.py` (NEW-02 section) |
-| NEW-03 | Rejected operations (e.g. malformed COMPLETED evidence) still advanced the coordinator's clock | FIXED | (this round) | `tests/test_round4_hardening.py` (NEW-03 section) |
-| NEW-04 | Heartbeat write failure left in-memory state (COMPLETED) and durable heartbeat (REVIEWING) split-brain, with no recovery path | FIXED (commit + dirty/sync durability model) | (this round) | `tests/test_round4_hardening.py` (NEW-04 section) |
-| NEW-05 | `PromptGraphContextProvider` assumed `len(results)` and didn't catch mid-iteration exceptions on a generator | FIXED | (this round) | `tests/test_context_provider.py` (NEW-05 section) |
-| NEW-06 | Checkpoint storage read+rewrote the ENTIRE history on every append (O(N) per append, O(N²) total) | FIXED (segmented storage) | (this round) | `tests/test_checkpoints.py` (NEW-06 section) |
-| NEW-07 | `RecoveryAttempt` had zero field validation | FIXED (P3) | (this round) | `tests/test_round4_hardening.py` (NEW-07 section) |
-| NEW-08 | Nonexistent `state_dir` produced a misleading `PathEscapeError`; a first write to a brand-new dir was completely broken; a pathologically long `execution_id` entered a ~10s lock-retry loop | FIXED | (this round) | `tests/test_round4_hardening.py` (NEW-08 section) |
-| NEW-09 | Release metadata pointed at a dead `hermes-oss/agentgear` repo and a fake `.local` email; sdist was missing SECURITY.md/CHANGELOG.md/CONTRIBUTING.md | FIXED (P4) | (this round) | CI step "Inspect release metadata" in `.github/workflows/ci.yml` |
-| NEW-10 | This index did not exist | FIXED | (this round) | this file |
+| NEW-01 | `RiskAssessment`/`ComplexityAssessment` factor VALUES unvalidated (NaN defeats `signal >= threshold`) | FIXED | `f8573ef` | `tests/test_round4_hardening.py` (NEW-01 section) |
+| NEW-02 | `ExecutionWatchdog.__init__` accepted invalid tier/reasoning/policy/budget, failing later with a raw error | FIXED | `f8573ef` | `tests/test_round4_hardening.py` (NEW-02 section) |
+| NEW-03 | Rejected operations (e.g. malformed COMPLETED evidence) still advanced the coordinator's clock | FIXED | `f8573ef` | `tests/test_round4_hardening.py` (NEW-03 section) |
+| NEW-04 | Heartbeat write failure left in-memory state (COMPLETED) and durable heartbeat (REVIEWING) split-brain, with no recovery path | FIXED (commit + dirty/sync durability model) | `f8573ef` | `tests/test_round4_hardening.py` (NEW-04 section) |
+| NEW-05 | `PromptGraphContextProvider` assumed `len(results)` and didn't catch mid-iteration exceptions on a generator | FIXED | `f8573ef` | `tests/test_context_provider.py` (NEW-05 section) |
+| NEW-06 | Checkpoint storage read+rewrote the ENTIRE history on every append (O(N) per append, O(N²) total) | FIXED (segmented storage) | `f8573ef` | `tests/test_checkpoints.py` (NEW-06 section) |
+| NEW-07 | `RecoveryAttempt` had zero field validation | FIXED (P3) | `f8573ef` | `tests/test_round4_hardening.py` (NEW-07 section) |
+| NEW-08 | Nonexistent `state_dir` produced a misleading `PathEscapeError`; a first write to a brand-new dir was completely broken; a pathologically long `execution_id` entered a ~10s lock-retry loop | FIXED | `f8573ef` | `tests/test_round4_hardening.py` (NEW-08 section) |
+| NEW-09 | Release metadata pointed at a dead `hermes-oss/agentgear` repo and a fake `.local` email; sdist was missing SECURITY.md/CHANGELOG.md/CONTRIBUTING.md | FIXED (P4) | `f8573ef` | CI step "Inspect release metadata" in `.github/workflows/ci.yml` |
+| NEW-10 | This index did not exist | FIXED | `f8573ef` | this file |
 
 **Self-adversarial additions (task #67 / section 33, discovered during this round's own verification, not pre-specified by the audit brief):**
 
 | ID | Description | Classification | Fix commit | Regression test(s) |
 |---|---|---|---|---|
-| R4-SA-01 | `checkpoint()` mutated in-memory `self._checkpoints` before the durable `CheckpointStore.append()` call, so a persistence failure left a phantom in-memory checkpoint | FIXED | (this round) | `tests/test_round4_hardening.py::test_checkpoint_persists_before_updating_in_memory_cache` |
-| R4-SA-02 | `ExecutionWatchdog.__init__` accepted a filesystem-unsafe `execution_id` even with `state_dir` set; only discovered on the first `start()`, after an irreversible RUNNING transition + budget commit | FIXED | (this round) | `tests/test_round4_hardening.py::test_constructor_eagerly_rejects_filesystem_unsafe_execution_id_when_durable`, `test_constructor_allows_filesystem_unsafe_execution_id_without_state_dir` |
+| R4-SA-01 | `checkpoint()` mutated in-memory `self._checkpoints` before the durable `CheckpointStore.append()` call, so a persistence failure left a phantom in-memory checkpoint | FIXED | `f8573ef` | `tests/test_round4_hardening.py::test_checkpoint_persists_before_updating_in_memory_cache` |
+| R4-SA-02 | `ExecutionWatchdog.__init__` accepted a filesystem-unsafe `execution_id` even with `state_dir` set; only discovered on the first `start()`, after an irreversible RUNNING transition + budget commit | FIXED | `f8573ef` | `tests/test_round4_hardening.py::test_constructor_eagerly_rejects_filesystem_unsafe_execution_id_when_durable`, `test_constructor_allows_filesystem_unsafe_execution_id_without_state_dir` |
+
+---
+
+## Round 5 (baseline `f8573ef`, verdict C — fix before promoting: 0 P0, 0 P1, 6 P2, 5 P3, 0 P4)
+
+Full writeup: `docs/audits/remediation-round-5.md`.
+
+| ID | Description | Classification | Fix commit | Regression test(s) |
+|---|---|---|---|---|
+| AG5-01 | `CheckpointStore.append()`'s segment-capacity check was advisory, not a hard bound, under real concurrency | FIXED (execution-scoped lock) | (this round) | `tests/test_persistence_concurrency.py::test_checkpoint_segment_capacity_is_a_hard_cap_under_real_concurrency`, `tests/test_checkpoints.py` (AG5-01 section) |
+| AG5-02 | `record_recovery_result()` mutated recovery state before validating `result`/`evidence` | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-02 section) |
+| AG5-03 | `ActivityRecord` accepted non-bool `succeeded`/`is_trivial` and malformed `error`; heartbeat dirty flag didn't cover construction failures | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-03 section) |
+| AG5-04 | `ExecutionState` subclasses `str`; `advance("testing")` poisoned the state machine with a raw string | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-04 section) |
+| AG5-05 | Heartbeat went stale (dirty=False but disk out of date) after ordinary `record_activity()`/`checkpoint()` calls | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-05 section) |
+| AG5-06 | Relative `state_dir` silently rebound to the process's CWD at operation time, not construction time | FIXED | (this round) | `tests/test_round5_hardening.py` (AG5-06 section) |
+| AG5-07 | `PromptGraphContextProvider` echoed a raw adapter exception message (potential secret leak) into `ContextPackage.note` | FIXED (P3) | (this round) | `tests/test_context_provider.py::test_promptgraph_provider_search_exception_message_is_never_echoed` |
+| AG5-08 | Stale `hermes-oss/promptgraph` link in current-facing README.md | FIXED (P3) | (this round) | `tests/test_release_metadata.py` |
+| AG5-09 | `docs/audits/index.md` shipped with unfinalized `(this round)` placeholders for Round 4's already-fixed findings | FIXED (two-commit workflow) | (this round) | `tests/test_release_metadata.py::test_audit_index_has_no_unfinalized_placeholder_shas` |
+| AG5-10 | `state_dir=""` silently disabled persistence instead of raising | FIXED (P3) | (this round) | `tests/test_round5_hardening.py` (AG5-10 section) |
+| AG5-11 | CI's "standalone" check incorrectly asserted optional siblings must be ABSENT, not merely optional | FIXED (P3) | (this round) | `tests/test_standalone.py::test_core_plan_pipeline_unaffected_by_an_actually_importable_sibling`, `.github/workflows/ci.yml` |
+
+**Self-adversarial additions (cross-cutting enum sweep, discovered during this round's own
+verification, not pre-specified by the audit brief):**
+
+| ID | Description | Classification | Fix commit | Regression test(s) |
+|---|---|---|---|---|
+| R5-SA-01 | `ExecutionStateMachine.__init__` accepted `state="running"` directly (same str-enum trap as AG5-04, at the constructor rather than `transition()`) | FIXED | (this round) | `tests/test_round5_hardening.py::test_state_machine_constructor_rejects_raw_string_state` |
+| R5-SA-02 | `ExecutionBudgetLedger.reserve(kind=...)` accepted a raw string for `ReservationKind`, poisoning the resulting `BudgetReservation.kind` | FIXED | (this round) | `tests/test_round5_hardening.py::test_budget_ledger_reserve_rejects_raw_string_kind` |
 
 ---
 
