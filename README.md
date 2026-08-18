@@ -11,7 +11,7 @@ PLANNING:            TaskProfile -> ExecutionPlan          (agentgear.plan)
 RUNTIME SUPERVISION:  ExecutionWatchdog -> lifecycle enforcement
 ```
 
-Part of the HERMES OSS ecosystem (PromptGraph, AgentGear, SkillGuard, AgentBench, ProjectKaizen). Every tool in the ecosystem is **useful alone, better together** — AgentGear has no required dependency on any sibling project.
+Part of the HERMES OSS ecosystem ([PromptGraph](https://github.com/Human-Weapon/PromptGraph), AgentGear, [SkillGuard](https://github.com/Human-Weapon/SkillGuard), [AgentBench](https://github.com/Human-Weapon/AgentBench), [ProjectKaizen](https://github.com/Human-Weapon/ProjectKaizen)). Every tool in the ecosystem is **useful alone, better together** — AgentGear has no required dependency on any sibling project.
 
 ## What AgentGear IS
 
