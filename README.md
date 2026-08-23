@@ -11,7 +11,9 @@ PLANNING:            TaskProfile -> ExecutionPlan          (agentgear.plan)
 RUNTIME SUPERVISION:  ExecutionWatchdog -> lifecycle enforcement
 ```
 
-Part of the HERMES OSS ecosystem ([PromptGraph](https://github.com/Human-Weapon/PromptGraph), AgentGear, [SkillGuard](https://github.com/Human-Weapon/SkillGuard), [AgentBench](https://github.com/Human-Weapon/AgentBench), [ProjectKaizen](https://github.com/Human-Weapon/ProjectKaizen)). Every tool in the ecosystem is **useful alone, better together** — AgentGear has no required dependency on any sibling project.
+Part of the HERMES OSS collection ([PromptGraph](https://github.com/Human-Weapon/PromptGraph), AgentGear, [SkillGuard](https://github.com/Human-Weapon/SkillGuard), [AgentBench](https://github.com/Human-Weapon/AgentBench), [ProjectKaizen](https://github.com/Human-Weapon/ProjectKaizen)) — **useful alone, better together**. AgentGear has no required dependency on any sibling project.
+
+> **About HERMES OSS:** HERMES OSS is the name used for this collection of five independent open-source tools. There is no separate HERMES package, private runner, hidden orchestrator, or required sixth component. Each tool works standalone. "Better together" means the optional integrations documented below, not a required central runtime or an automated five-tool pipeline.
 
 ## What AgentGear IS
 
@@ -204,6 +206,14 @@ What the coordinator composes and enforces on your behalf:
 - Every signal (`repeated_failures`, `uncertainty`, ...) is validated on construction — out-of-range, NaN/Infinity, or negative values raise `InvalidObservationError` instead of silently corrupting a decision.
 
 ## Optional integrations
+
+Current, truthful status:
+
+| Relationship | Status | Notes |
+|---|---|---|
+| PromptGraph → AgentGear | **Implemented** | `PromptGraphContextProvider` (below); degrades gracefully if PromptGraph isn't installed. |
+| AgentGear → AgentBench | **Interface only** | `benchmark_interface.EvidenceSource` defines a shape; not wired into routing in v0.1.0. |
+| SkillGuard / ProjectKaizen | **Not integrated** | No adapter exists in either direction today. |
 
 ### PromptGraph
 

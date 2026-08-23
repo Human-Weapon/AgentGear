@@ -1,6 +1,6 @@
 # Contributing to AgentGear
 
-Thanks for considering contributing! This is part of the HERMES OSS ecosystem. By participating you agree to the ecosystem principles: **USEFUL ALONE + BETTER TOGETHER**, security by default, auditability, and evidence over confidence.
+Thanks for considering contributing! AgentGear is part of the HERMES OSS collection — a collection label for five independent tools, not a required runtime or dependency. By participating you agree to the collection's principles: **USEFUL ALONE + BETTER TOGETHER**, security by default, auditability, and evidence over confidence.
 
 ## Before you start
 
