@@ -232,6 +232,23 @@ def _escalation_summary(policy: Policy) -> str:
     )
 
 
+def _actionable_context_rationale(task_profile: TaskProfile) -> tuple[str, ...]:
+    context = task_profile.actionable_context
+
+    def known_or_unknown(values: tuple[str, ...], *, separator: str) -> str:
+        return separator.join(values) if values else "UNKNOWN (not supplied)"
+
+    rollback = context.rollback_strategy or "UNKNOWN (not supplied)"
+    return (
+        f"objective: {task_profile.description}",
+        f"affected files: {known_or_unknown(context.affected_files, separator=', ')}",
+        f"dependencies: {known_or_unknown(context.dependencies, separator=', ')}",
+        f"acceptance criteria: {known_or_unknown(context.acceptance_criteria, separator='; ')}",
+        f"verification: {known_or_unknown(context.verification, separator='; ')}",
+        f"rollback strategy: {rollback}",
+    )
+
+
 def build_execution_plan(
     task_profile: TaskProfile,
     complexity: ComplexityAssessment,
@@ -284,6 +301,7 @@ def build_execution_plan(
         (complexity.rationale, risk.rationale)
         + primary_model.rationale
         + strategy.rationale
+        + _actionable_context_rationale(task_profile)
         + (
             f"context_budget_tokens={context_budget_tokens}",
             f"estimated_cost={total_cost:.4f} (budget={policy.budget.max_estimated_cost:g})",
@@ -292,6 +310,7 @@ def build_execution_plan(
 
     return ExecutionPlan(
         task_profile=task_profile,
+        actionable_context=task_profile.actionable_context,
         complexity=complexity,
         risk=risk,
         primary_model=primary_model,

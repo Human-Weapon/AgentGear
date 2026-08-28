@@ -52,6 +52,7 @@ from .exceptions import (
     WatchdogError,
 )
 from .models import (
+    ActionableTaskContext,
     AgentAssignment,
     AgentRole,
     BlockedReport,
@@ -88,6 +89,7 @@ __all__ = [
     "CriticalRiskPolicy",
     "ModelTierMapping",
     "TaskProfile",
+    "ActionableTaskContext",
     "ComplexityAssessment",
     "ComplexityLevel",
     "RiskAssessment",

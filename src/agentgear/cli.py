@@ -162,6 +162,13 @@ def _cmd_plan(args: argparse.Namespace) -> int:
             "review_required": exec_plan.review_required,
             "escalation_policy": exec_plan.escalation_policy_summary,
             "recovery_policy": exec_plan.recovery_policy_summary,
+            "actionable_context": {
+                "affected_files": list(exec_plan.actionable_context.affected_files),
+                "dependencies": list(exec_plan.actionable_context.dependencies),
+                "acceptance_criteria": list(exec_plan.actionable_context.acceptance_criteria),
+                "verification": list(exec_plan.actionable_context.verification),
+                "rollback_strategy": exec_plan.actionable_context.rollback_strategy,
+            },
             "rationale": list(exec_plan.rationale),
         },
         args.json,

@@ -192,6 +192,15 @@ def _validate_non_blank_str(name: str, value: str) -> str:
     return value
 
 
+def _validate_task_context_items(name: str, value: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise TaskProfileError(f"{name} must be a tuple[str, ...], got {type(value).__name__}")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise TaskProfileError(f"{name} must contain only non-empty, non-blank strings")
+    return value
+
+
 def _require_blocked_report_str(name: str, value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidBlockedReportError(f"{name} must be a non-empty, non-blank string")
@@ -222,6 +231,30 @@ def _validate_str_tuple(name: str, value: tuple[str, ...]) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class ActionableTaskContext:
+    """Known task facts that AgentGear preserves but does not infer.
+
+    The caller may obtain these facts from PromptGraph or any other context
+    source. AgentGear uses them to make an execution plan inspectable; it
+    never extracts them from free text or invents values that were not
+    supplied.
+    """
+
+    affected_files: tuple[str, ...] = field(default_factory=tuple)
+    dependencies: tuple[str, ...] = field(default_factory=tuple)
+    acceptance_criteria: tuple[str, ...] = field(default_factory=tuple)
+    verification: tuple[str, ...] = field(default_factory=tuple)
+    rollback_strategy: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("affected_files", "dependencies", "acceptance_criteria", "verification"):
+            object.__setattr__(self, name, _validate_task_context_items(name, getattr(self, name)))
+        if self.rollback_strategy is not None:
+            if not isinstance(self.rollback_strategy, str) or not self.rollback_strategy.strip():
+                raise TaskProfileError("rollback_strategy must be a non-empty string or None")
+
+
+@dataclass(frozen=True)
 class TaskProfile:
     """Raw, caller-supplied signals describing a task to be executed.
 
@@ -243,6 +276,7 @@ class TaskProfile:
     existing_test_coverage: float = 0.5
     prior_failures: int = 0
     expected_output_tokens: int = 2000
+    actionable_context: ActionableTaskContext = field(default_factory=ActionableTaskContext)
 
     def __post_init__(self) -> None:
         if not isinstance(self.description, str) or not self.description.strip():
@@ -290,6 +324,8 @@ class TaskProfile:
             "expected_output_tokens",
             _validate_non_negative_int("expected_output_tokens", self.expected_output_tokens),
         )
+        if not isinstance(self.actionable_context, ActionableTaskContext):
+            raise TaskProfileError("actionable_context must be an ActionableTaskContext")
 
 
 @dataclass(frozen=True)
@@ -413,6 +449,7 @@ class ExecutionPlan:
     """The full, explainable output of AgentGear for one task."""
 
     task_profile: TaskProfile
+    actionable_context: ActionableTaskContext
     complexity: ComplexityAssessment
     risk: RiskAssessment
     primary_model: ModelProfile

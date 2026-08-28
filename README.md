@@ -77,6 +77,31 @@ agentgear status --state-dir ./.agentops/metrics --execution-id my-run-1
 agentgear simulate --task "Fix a flaky test" --repeated-failures 2 --json
 ```
 
+## Actionable task context
+
+AgentGear does not infer implementation details from a short task title. If
+the caller already knows them — for example, from PromptGraph or a project
+brief — pass those facts as `ActionableTaskContext`. The resulting
+`ExecutionPlan` preserves them and marks omitted fields as `UNKNOWN (not
+supplied)` in its rationale rather than inventing specificity.
+
+```python
+from agentgear import ActionableTaskContext, TaskProfile, plan
+
+context = ActionableTaskContext(
+    affected_files=("src/boss.js", "src/damage.js"),
+    dependencies=("explosive damage system",),
+    acceptance_criteria=("a single grenade cannot defeat a full-health boss",),
+    verification=("automated grenade-damage test", "manual boss fight"),
+    rollback_strategy="revert the isolated damage-rule change",
+)
+result = plan(TaskProfile("Boss cannot die from one grenade", actionable_context=context))
+```
+
+This is a boundary contract, not a second context store: PromptGraph or the
+caller owns the facts; AgentGear only uses them to make its execution plan
+inspectable.
+
 ## Model routing
 
 AgentGear routes to one of four **provider-agnostic** capability tiers:
